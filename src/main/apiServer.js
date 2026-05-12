@@ -78,6 +78,12 @@ class ApiServer {
         return;
       }
 
+      if (parsed.pathname === '/api/echo/send' && req.method === 'POST') {
+        const body = await readJson(req);
+        this.json(res, await this.proxy.sendEchoRequest(body));
+        return;
+      }
+
       const flowMatch = parsed.pathname.match(/^\/api\/history\/([^/]+)$/);
       if (flowMatch && req.method === 'GET') {
         const flow = this.proxy.getFlow(flowMatch[1]);

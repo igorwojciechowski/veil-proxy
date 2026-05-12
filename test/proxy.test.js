@@ -284,6 +284,50 @@ test('reuses SOCKS5 upstream connections for sequential HTTP requests', async ()
   }
 });
 
+test('sends Echo requests through configured SOCKS5 upstream proxy', async () => {
+  const origin = await createOriginServer();
+  const socks = await createSocks5Server({ requireIpAddressTypeForIpTargets: true });
+  const app = createApp({
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+      upstream: {
+        mode: 'socks5',
+        host: '127.0.0.1',
+        port: socks.port,
+      },
+    },
+  });
+
+  await app.start();
+
+  try {
+    const result = await app.proxy.sendEchoRequest({
+      rawRequest: [
+        'POST /echo-relay HTTP/1.1',
+        `Host: 127.0.0.1:${origin.port}`,
+        'Content-Type: text/plain',
+        'Content-Length: 999',
+        '',
+        'relay-body',
+      ].join('\r\n'),
+    });
+
+    assert.equal(result.error, null);
+    assert.equal(result.response.statusCode, 200);
+    assert.deepEqual(JSON.parse(result.response.bodyText), {
+      method: 'POST',
+      url: '/echo-relay',
+      body: 'relay-body',
+    });
+    assert.equal(socks.requests.length, 1);
+  } finally {
+    await app.stop();
+    await socks.close();
+    await origin.close();
+  }
+});
+
 test('tunnels CONNECT requests through a strict SOCKS5 upstream proxy', async () => {
   const origin = await createOriginServer();
   const socks = await createSocks5Server({ requireIpAddressTypeForIpTargets: true });

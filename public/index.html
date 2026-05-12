@@ -30,6 +30,10 @@
             <span class="nav-icon">◎</span>
             <span>Scope</span>
           </button>
+          <button class="nav-item" type="button" data-view="echo" title="Echo">
+            <span class="nav-icon">↬</span>
+            <span>Echo</span>
+          </button>
           <button class="nav-item" type="button" data-view="intercept" title="Intercept">
             <span class="nav-icon">⏸</span>
             <span>Intercept</span>
@@ -147,7 +151,7 @@
                       <span>Raw request</span>
                       <button class="button ghost copy-button" type="button" data-copy-target="requestRawText">Copy</button>
                     </div>
-                    <textarea id="requestRawText" class="raw-textarea" spellcheck="false" readonly></textarea>
+                    <pre id="requestRawText" class="raw-code http-code" tabindex="0"></pre>
                   </div>
                 </div>
                 <div id="responseTab" class="tab-page">
@@ -171,7 +175,7 @@
                       <span>Raw response</span>
                       <button class="button ghost copy-button" type="button" data-copy-target="responseRawText">Copy</button>
                     </div>
-                    <textarea id="responseRawText" class="raw-textarea" spellcheck="false" readonly></textarea>
+                    <pre id="responseRawText" class="raw-code http-code" tabindex="0"></pre>
                   </div>
                 </div>
                 <div id="metaTab" class="tab-page">
@@ -208,6 +212,61 @@
                 <button id="refreshSiteMapBtn" class="button ghost compact-button" type="button">Refresh</button>
               </div>
               <div id="sitePathsList" class="site-path-list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="echoView" class="view">
+          <div class="echo-layout">
+            <section class="panel echo-panel">
+              <div class="echo-tabs-bar">
+                <div id="echoTabs" class="echo-tabs"></div>
+                <button id="newEchoTabBtn" class="button ghost compact-button" type="button">+ Tab</button>
+              </div>
+
+              <div id="emptyEcho" class="empty-state">Send a request to Echo</div>
+              <div id="echoWorkspace" class="echo-workspace hidden">
+                <section class="echo-request-pane">
+                  <div class="panel-title-row">
+                    <div>
+                      <h2>Request</h2>
+                      <div id="echoRequestSubtitle" class="panel-subtitle">Editable request</div>
+                    </div>
+                    <div class="button-row">
+                      <button id="closeEchoTabBtn" class="button ghost compact-button" type="button">Close tab</button>
+                      <button id="sendEchoBtn" class="button primary" type="button">Send</button>
+                    </div>
+                  </div>
+
+                  <div class="echo-raw-editor">
+                    <div class="raw-toolbar">
+                      <span>Raw request</span>
+                      <button class="button ghost copy-button" type="button" data-copy-target="echoRawRequest">Copy</button>
+                    </div>
+                    <div class="raw-editor-wrap">
+                      <pre id="echoRawRequestHighlight" class="raw-code http-code raw-editor-highlight" aria-hidden="true"></pre>
+                      <textarea id="echoRawRequest" class="raw-editor-input" spellcheck="false" autocomplete="off"></textarea>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="echo-response-pane">
+                  <div class="panel-title-row">
+                    <div>
+                      <h2>Response</h2>
+                      <div id="echoResponseMeta" class="panel-subtitle">No response yet</div>
+                    </div>
+                    <div id="echoResponseStatus" class="status-pill">-</div>
+                  </div>
+                  <div class="echo-response-content">
+                    <div class="raw-toolbar">
+                      <span>Raw response</span>
+                      <button class="button ghost copy-button" type="button" data-copy-target="echoRawResponse">Copy</button>
+                    </div>
+                    <pre id="echoRawResponse" class="raw-code http-code echo-raw-response" tabindex="0">Send the request to see a response.</pre>
+                  </div>
+                </section>
+              </div>
             </section>
           </div>
         </section>
@@ -399,6 +458,10 @@
           <button id="saveRulesBtn" class="button primary" type="button">Save rules</button>
         </footer>
       </section>
+    </div>
+
+    <div id="contextMenu" class="context-menu hidden" role="menu">
+      <button id="sendToEchoContextBtn" type="button" role="menuitem">Send to Echo</button>
     </div>
 
     <script src="/app.js"></script>

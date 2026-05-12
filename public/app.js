@@ -16,6 +16,9 @@ const state = {
   selectedSiteHost: null,
   siteMapSearch: '',
   siteMapInScopeOnly: false,
+  echoTabs: [],
+  selectedEchoTabId: null,
+  echoContextFlowId: null,
   rulesModalStage: 'request',
 };
 
@@ -37,6 +40,20 @@ const el = {
   sitePathsSubtitle: document.querySelector('#sitePathsSubtitle'),
   sitePathsList: document.querySelector('#sitePathsList'),
   refreshSiteMapBtn: document.querySelector('#refreshSiteMapBtn'),
+  echoTabs: document.querySelector('#echoTabs'),
+  newEchoTabBtn: document.querySelector('#newEchoTabBtn'),
+  emptyEcho: document.querySelector('#emptyEcho'),
+  echoWorkspace: document.querySelector('#echoWorkspace'),
+  echoRequestSubtitle: document.querySelector('#echoRequestSubtitle'),
+  echoRawRequest: document.querySelector('#echoRawRequest'),
+  echoRawRequestHighlight: document.querySelector('#echoRawRequestHighlight'),
+  closeEchoTabBtn: document.querySelector('#closeEchoTabBtn'),
+  sendEchoBtn: document.querySelector('#sendEchoBtn'),
+  echoResponseStatus: document.querySelector('#echoResponseStatus'),
+  echoResponseMeta: document.querySelector('#echoResponseMeta'),
+  echoRawResponse: document.querySelector('#echoRawResponse'),
+  contextMenu: document.querySelector('#contextMenu'),
+  sendToEchoContextBtn: document.querySelector('#sendToEchoContextBtn'),
   emptyDetail: document.querySelector('#emptyDetail'),
   flowDetail: document.querySelector('#flowDetail'),
   detailMethod: document.querySelector('#detailMethod'),
@@ -160,6 +177,21 @@ function bindUi() {
   });
 
   el.refreshSiteMapBtn.addEventListener('click', () => loadSiteMap());
+  el.newEchoTabBtn.addEventListener('click', () => createBlankEchoTab());
+  el.closeEchoTabBtn.addEventListener('click', closeSelectedEchoTab);
+  el.sendEchoBtn.addEventListener('click', sendSelectedEchoRequest);
+  el.echoRawRequest.addEventListener('input', syncSelectedEchoRequest);
+  el.echoRawRequest.addEventListener('scroll', syncEchoRawEditorScroll);
+  document.addEventListener('contextmenu', openEchoContextMenu);
+  document.addEventListener('click', closeContextMenu);
+  window.addEventListener('blur', closeContextMenu);
+  el.sendToEchoContextBtn.addEventListener('click', () => {
+    const flowId = state.echoContextFlowId;
+    closeContextMenu();
+    if (flowId) {
+      sendFlowToEcho(flowId);
+    }
+  });
 
   el.requestInterceptToggle.addEventListener('change', () => {
     patchConfig({ intercept: { requests: el.requestInterceptToggle.checked } });
@@ -267,6 +299,7 @@ function renderAll() {
   renderConfig();
   renderTraffic();
   renderSiteMap();
+  renderEcho();
   renderPending();
   renderDetail();
 }
@@ -309,8 +342,9 @@ function renderTraffic() {
       const status = flow.error ? 'ERR' : flow.statusCode || (flow.type === 'connect' ? 'TUN' : '-');
       const size = flow.type === 'connect' ? formatBytes((flow.tunnel?.bytesUp || 0) + (flow.tunnel?.bytesDown || 0)) : formatBytes(flow.responseBytes || 0);
       const duration = flow.durationMs === null || flow.durationMs === undefined ? 'open' : `${flow.durationMs}ms`;
+      const echoAttr = flow.type === 'http' ? `data-echo-flow-id="${escapeHtml(flow.id)}"` : '';
       return `
-        <tr data-flow-id="${escapeHtml(flow.id)}" class="${flow.id === state.selectedFlowId ? 'selected' : ''}">
+        <tr data-flow-id="${escapeHtml(flow.id)}" ${echoAttr} class="${flow.id === state.selectedFlowId ? 'selected' : ''}">
           <td><span class="method-pill">${escapeHtml(flow.method)}</span></td>
           <td title="${escapeHtml(flow.host || '')}">${escapeHtml(flow.host || '')}</td>
           <td title="${escapeHtml(path || '')}">${escapeHtml(path || '')}</td>
@@ -397,8 +431,9 @@ function renderSitePaths(host) {
     paths
       .map((path) => {
         const latestFlowId = path.flowIds?.[0] || '';
+        const echoAttr = latestFlowId && path.path !== '(CONNECT tunnel)' ? `data-echo-flow-id="${escapeHtml(latestFlowId)}"` : '';
         return `
-          <button class="site-path-item" type="button" data-flow-id="${escapeHtml(latestFlowId)}">
+          <button class="site-path-item" type="button" data-flow-id="${escapeHtml(latestFlowId)}" ${echoAttr}>
             <span class="site-main-line">
               <span class="site-path-name" title="${escapeHtml(path.path)}">${escapeHtml(path.path)}</span>
               <span class="scope-chip ${path.inScope ? 'in-scope' : 'out-scope'}">${path.inScope ? 'in scope' : 'out'}</span>
@@ -448,6 +483,204 @@ function sitePathSearchText(host, path) {
   return `${host.host} ${path.path} ${path.query || ''} ${path.lastUrl || ''} ${(path.methods || []).join(' ')}`.toLowerCase();
 }
 
+function renderEcho() {
+  if (!state.echoTabs.some((tab) => tab.id === state.selectedEchoTabId)) {
+    state.selectedEchoTabId = state.echoTabs[0]?.id || null;
+  }
+
+  el.echoTabs.innerHTML =
+    state.echoTabs
+      .map(
+        (tab) => `
+          <button class="echo-tab ${tab.id === state.selectedEchoTabId ? 'active' : ''}" type="button" data-echo-tab-id="${escapeHtml(tab.id)}">
+            <span class="method-pill">${escapeHtml(tab.method || 'GET')}</span>
+            <span title="${escapeHtml(tab.title)}">${escapeHtml(tab.title)}</span>
+          </button>
+        `,
+      )
+      .join('');
+
+  el.echoTabs.querySelectorAll('[data-echo-tab-id]').forEach((button) => {
+    button.addEventListener('click', () => {
+      syncSelectedEchoRequest();
+      state.selectedEchoTabId = button.dataset.echoTabId;
+      renderEcho();
+    });
+  });
+
+  const tab = selectedEchoTab();
+  if (!tab) {
+    el.emptyEcho.classList.remove('hidden');
+    el.echoWorkspace.classList.add('hidden');
+    return;
+  }
+
+  el.emptyEcho.classList.add('hidden');
+  el.echoWorkspace.classList.remove('hidden');
+  el.echoRequestSubtitle.textContent = tab.source || 'Editable request';
+  el.echoRawRequest.value = tab.rawRequest || '';
+  renderEchoRawRequest();
+  renderEchoResponse(tab);
+}
+
+function renderEchoResponse(tab) {
+  el.echoResponseStatus.classList.toggle('error', Boolean(tab.error));
+  if (tab.loading) {
+    el.echoResponseStatus.textContent = '...';
+    el.echoResponseMeta.textContent = 'Sending request...';
+    setHighlightedHttp(el.echoRawResponse, 'Waiting for response.');
+    return;
+  }
+
+  if (tab.error) {
+    el.echoResponseStatus.textContent = 'ERR';
+    el.echoResponseMeta.textContent = tab.durationMs ? `${tab.durationMs}ms` : 'Request failed';
+    setHighlightedHttp(el.echoRawResponse, `Echo request failed\r\n\r\n${tab.error}`);
+    return;
+  }
+
+  if (!tab.response) {
+    el.echoResponseStatus.textContent = '-';
+    el.echoResponseMeta.textContent = 'No response yet';
+    setHighlightedHttp(el.echoRawResponse, 'Send the request to see a response.');
+    return;
+  }
+
+  el.echoResponseStatus.textContent = `${tab.response.statusCode || '-'} ${tab.response.statusMessage || ''}`.trim();
+  el.echoResponseMeta.textContent = `${formatBytes(base64ByteLength(tab.response.bodyBase64 || ''))} · ${tab.durationMs ?? '-'}ms`;
+  setHighlightedHttp(el.echoRawResponse, buildRawResponse({ response: tab.response }));
+}
+
+function selectedEchoTab() {
+  return state.echoTabs.find((tab) => tab.id === state.selectedEchoTabId) || null;
+}
+
+function renderEchoRawRequest() {
+  el.echoRawRequestHighlight.innerHTML = `${highlightHttpMessage(el.echoRawRequest.value)}\n`;
+  syncEchoRawEditorScroll();
+}
+
+function syncEchoRawEditorScroll() {
+  el.echoRawRequestHighlight.scrollTop = el.echoRawRequest.scrollTop;
+  el.echoRawRequestHighlight.scrollLeft = el.echoRawRequest.scrollLeft;
+}
+
+function createBlankEchoTab() {
+  const tab = createEchoTab({
+    method: 'GET',
+    url: 'http://example.com/',
+    headers: {
+      host: 'example.com',
+      'user-agent': 'Veil Echo',
+    },
+    bodyText: '',
+  }, 'Manual request');
+  state.echoTabs.unshift(tab);
+  state.selectedEchoTabId = tab.id;
+  setView('echo');
+  renderEcho();
+}
+
+async function sendFlowToEcho(flowId) {
+  const flow = state.selectedFlow?.id === flowId ? state.selectedFlow : await api(`/api/history/${encodeURIComponent(flowId)}`);
+  const tab = createEchoTab(flow.request, `${flow.request.method} ${requestTarget(flow.request.url)}`, `From flow ${flow.id}`);
+  state.echoTabs.unshift(tab);
+  state.selectedEchoTabId = tab.id;
+  setView('echo');
+  renderEcho();
+}
+
+function createEchoTab(request, title, source = 'Editable request') {
+  const parsed = safeUrl(request.url);
+  const displayTitle = title || `${request.method || 'GET'} ${parsed ? requestTarget(request.url) : request.url || '/'}`;
+  const rawRequest = request.rawRequest || buildRawRequest({ request });
+  const parsedRaw = parseRawRequestMeta(rawRequest);
+  return {
+    id: `echo-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    title: displayTitle,
+    source,
+    method: parsedRaw.method || request.method || 'GET',
+    rawRequest,
+    response: null,
+    loading: false,
+    error: null,
+    durationMs: null,
+  };
+}
+
+function syncSelectedEchoRequest() {
+  const tab = selectedEchoTab();
+  if (!tab || el.echoWorkspace.classList.contains('hidden')) {
+    return;
+  }
+
+  tab.rawRequest = el.echoRawRequest.value;
+  const parsed = parseRawRequestMeta(tab.rawRequest);
+  tab.method = parsed.method || 'GET';
+  tab.title = `${tab.method} ${parsed.target || '/'}`;
+  renderEchoRawRequest();
+}
+
+function closeSelectedEchoTab() {
+  const selectedId = state.selectedEchoTabId;
+  state.echoTabs = state.echoTabs.filter((tab) => tab.id !== selectedId);
+  state.selectedEchoTabId = state.echoTabs[0]?.id || null;
+  renderEcho();
+}
+
+async function sendSelectedEchoRequest() {
+  syncSelectedEchoRequest();
+  const tab = selectedEchoTab();
+  if (!tab) {
+    return;
+  }
+
+  tab.loading = true;
+  tab.error = null;
+  tab.response = null;
+  renderEcho();
+
+  try {
+    const result = await api('/api/echo/send', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        rawRequest: tab.rawRequest,
+      }),
+    });
+
+    tab.response = result.response;
+    tab.error = result.error;
+    tab.durationMs = result.durationMs;
+  } catch (error) {
+    tab.response = null;
+    tab.error = formatError(error);
+    tab.durationMs = null;
+  } finally {
+    tab.loading = false;
+  }
+  renderEcho();
+}
+
+function openEchoContextMenu(event) {
+  const source = event.target.closest('[data-echo-flow-id]');
+  if (!source || !source.dataset.echoFlowId) {
+    closeContextMenu();
+    return;
+  }
+
+  event.preventDefault();
+  state.echoContextFlowId = source.dataset.echoFlowId;
+  el.contextMenu.style.left = `${Math.min(event.clientX, window.innerWidth - 180)}px`;
+  el.contextMenu.style.top = `${Math.min(event.clientY, window.innerHeight - 46)}px`;
+  el.contextMenu.classList.remove('hidden');
+}
+
+function closeContextMenu() {
+  state.echoContextFlowId = null;
+  el.contextMenu.classList.add('hidden');
+}
+
 function filteredHistory() {
   return state.history.filter((flow) => {
     if (state.trafficFilter === 'http' && flow.type !== 'http') return false;
@@ -470,12 +703,18 @@ function renderDetail() {
   if (!state.selectedFlow) {
     el.emptyDetail.classList.remove('hidden');
     el.flowDetail.classList.add('hidden');
+    delete el.flowDetail.dataset.echoFlowId;
     return;
   }
 
   const flow = state.selectedFlow;
   el.emptyDetail.classList.add('hidden');
   el.flowDetail.classList.remove('hidden');
+  if (flow.type === 'http') {
+    el.flowDetail.dataset.echoFlowId = flow.id;
+  } else {
+    delete el.flowDetail.dataset.echoFlowId;
+  }
   el.detailMethod.textContent = flow.request.method;
   el.detailUrl.textContent = flow.request.url;
   el.detailStatus.textContent = flow.error ? 'ERR' : flow.response ? `${flow.response.statusCode} ${flow.response.statusMessage || ''}` : flow.type;
@@ -485,13 +724,13 @@ function renderDetail() {
     kind: 'request',
     method: flow.request.method,
   });
-  el.requestRawText.value = buildRawRequest(flow);
+  setHighlightedHttp(el.requestRawText, buildRawRequest(flow));
   renderResponsePretty(flow);
   renderBody(el.responseBody, flow.response, {
     kind: 'response',
     statusCode: flow.response?.statusCode,
   });
-  el.responseRawText.value = buildRawResponse(flow);
+  setHighlightedHttp(el.responseRawText, buildRawResponse(flow));
   el.metaBody.textContent = JSON.stringify(
     {
       id: flow.id,
@@ -648,6 +887,21 @@ function buildRawMessage(startLine, headers, body) {
   return `${startLine}\r\n${headerText}\r\n\r\n${body || ''}`;
 }
 
+function setHighlightedHttp(target, raw) {
+  const text = String(raw || '');
+  target.dataset.rawText = text;
+  target.innerHTML = highlightHttpMessage(text);
+}
+
+function parseRawRequestMeta(raw) {
+  const firstLine = String(raw || '').split(/\r?\n/, 1)[0] || '';
+  const [method, target] = firstLine.trim().split(/\s+/);
+  return {
+    method: method ? method.toUpperCase() : '',
+    target: target || '',
+  };
+}
+
 function requestTarget(url) {
   const parsed = safeUrl(url);
   if (!parsed) {
@@ -663,8 +917,9 @@ function rawBodyText(message) {
   }
 
   const contentType = headerValue(message.headers, 'content-type') || 'application/octet-stream';
+  const formatted = formatBodyForContentType(message.bodyText || '', contentType);
   if (isTextContent(contentType)) {
-    return message.bodyText || '';
+    return formatted.text;
   }
 
   return `[binary body base64; content-type=${contentType}; size=${formatBytes(byteLength)}]\r\n${message.bodyBase64 || ''}`;
@@ -672,7 +927,7 @@ function rawBodyText(message) {
 
 async function copyTargetText(button) {
   const target = document.getElementById(button.dataset.copyTarget);
-  const text = target?.value || target?.textContent || '';
+  const text = target?.dataset?.rawText || target?.value || target?.textContent || '';
   if (!text) {
     return;
   }
@@ -736,11 +991,246 @@ function renderBody(container, message, context) {
 
   const pre = document.createElement('pre');
   if (isText) {
-    pre.textContent = message.bodyText || '';
+    const formatted = formatBodyForContentType(message.bodyText || '', contentType);
+    pre.className = `syntax-block language-${formatted.language}`;
+    pre.dataset.rawText = formatted.text;
+    pre.innerHTML = highlightStructuredText(formatted.text, formatted.language);
   } else {
-    pre.textContent = `Binary body: ${contentType}, ${formatBytes(byteLength)}\n\n${message.bodyBase64 || ''}`;
+    const binaryText = `Binary body: ${contentType}, ${formatBytes(byteLength)}\n\n${message.bodyBase64 || ''}`;
+    pre.className = 'syntax-block language-plain';
+    pre.dataset.rawText = binaryText;
+    pre.textContent = binaryText;
   }
   container.appendChild(pre);
+}
+
+function formatBodyForContentType(text, contentType = '') {
+  const source = String(text || '');
+  const type = contentType.split(';', 1)[0].trim().toLowerCase();
+
+  if (isJsonContentType(type)) {
+    return { text: formatJsonLike(source, type), language: 'json' };
+  }
+
+  if (type === 'application/x-www-form-urlencoded') {
+    return { text: formatUrlEncoded(source), language: 'form' };
+  }
+
+  if (isXmlContentType(type)) {
+    return { text: formatXmlLike(source), language: type === 'text/html' ? 'html' : 'xml' };
+  }
+
+  if (type.includes('javascript') || type.endsWith('/ecmascript')) {
+    return { text: source, language: 'js' };
+  }
+
+  if (type === 'text/css') {
+    return { text: source, language: 'css' };
+  }
+
+  return { text: source, language: 'plain' };
+}
+
+function isJsonContentType(type) {
+  return type === 'application/json' || type.endsWith('+json') || type.includes('json');
+}
+
+function isXmlContentType(type) {
+  return (
+    type === 'application/xml' ||
+    type === 'text/xml' ||
+    type === 'text/html' ||
+    type === 'image/svg+xml' ||
+    type.endsWith('+xml')
+  );
+}
+
+function formatJsonLike(text, type) {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return text;
+  }
+
+  try {
+    return JSON.stringify(JSON.parse(trimmed), null, 2);
+  } catch {
+    if (type.includes('ndjson') || trimmed.includes('\n')) {
+      const lines = trimmed.split(/\r?\n/);
+      try {
+        return lines
+          .map((line) => (line.trim() ? JSON.stringify(JSON.parse(line), null, 2) : ''))
+          .join('\n');
+      } catch {
+        return text;
+      }
+    }
+    return text;
+  }
+}
+
+function formatUrlEncoded(text) {
+  try {
+    const params = new URLSearchParams(text);
+    const entries = [...params.entries()];
+    if (entries.length === 0) {
+      return text;
+    }
+    return entries.map(([name, value]) => `${name}=${value}`).join('\n');
+  } catch {
+    return text;
+  }
+}
+
+function formatXmlLike(text) {
+  const trimmed = text.trim();
+  if (!trimmed || !trimmed.includes('<')) {
+    return text;
+  }
+
+  const normalized = trimmed.replace(/>\s+</g, '><').replace(/</g, '\n<').trim();
+  const lines = normalized.split(/\n/).filter(Boolean);
+  let depth = 0;
+  return lines
+    .map((line) => {
+      const trimmedLine = line.trim();
+      if (/^<\//.test(trimmedLine)) {
+        depth = Math.max(0, depth - 1);
+      }
+      const out = `${'  '.repeat(depth)}${trimmedLine}`;
+      if (
+        /^<[^!?/][^>]*[^/]?>$/.test(trimmedLine) &&
+        !/^<[^>]+>.*<\/[^>]+>$/.test(trimmedLine) &&
+        !/^<(area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)\b/i.test(trimmedLine)
+      ) {
+        depth += 1;
+      }
+      return out;
+    })
+    .join('\n');
+}
+
+function highlightHttpMessage(raw) {
+  const text = String(raw || '');
+  const normalized = text.replace(/\r\n/g, '\n');
+  const separator = normalized.search(/\n\n/);
+  const headerText = separator === -1 ? normalized : normalized.slice(0, separator);
+  const bodyText = separator === -1 ? '' : normalized.slice(separator + 2);
+  const lines = headerText.split('\n');
+  const startLine = lines.shift() || '';
+  const headers = textToHeaders(lines.join('\n'));
+  const bodyLanguage = languageFromHeaders(headers);
+
+  const parts = [];
+  if (startLine) {
+    parts.push(`<span class="syntax-start-line">${highlightHttpStartLine(startLine)}</span>`);
+  }
+
+  for (const line of lines) {
+    parts.push(highlightHeaderLine(line));
+  }
+
+  if (separator !== -1 || bodyText) {
+    parts.push('');
+    parts.push(highlightStructuredText(bodyText, bodyLanguage));
+  }
+
+  return parts.join('\n');
+}
+
+function highlightHttpStartLine(line) {
+  const trimmed = line.trim();
+  if (trimmed.startsWith('HTTP/')) {
+    const match = trimmed.match(/^(HTTP\/[0-9.]+)\s+(\d{3})(?:\s+(.*))?$/);
+    if (!match) {
+      return escapeHtml(line);
+    }
+    return `<span class="syntax-protocol">${escapeHtml(match[1])}</span> <span class="syntax-status">${escapeHtml(match[2])}</span>${match[3] ? ` <span class="syntax-reason">${escapeHtml(match[3])}</span>` : ''}`;
+  }
+
+  const match = trimmed.match(/^([A-Z0-9_-]+)\s+(\S+)(?:\s+(HTTP\/[0-9.]+))?$/i);
+  if (!match) {
+    return escapeHtml(line);
+  }
+  return `<span class="syntax-method">${escapeHtml(match[1].toUpperCase())}</span> <span class="syntax-target">${escapeHtml(match[2])}</span>${match[3] ? ` <span class="syntax-protocol">${escapeHtml(match[3])}</span>` : ''}`;
+}
+
+function highlightHeaderLine(line) {
+  const index = line.indexOf(':');
+  if (index === -1) {
+    return escapeHtml(line);
+  }
+  return `<span class="syntax-header-name">${escapeHtml(line.slice(0, index))}</span><span class="syntax-punctuation">:</span><span class="syntax-header-value">${escapeHtml(line.slice(index + 1))}</span>`;
+}
+
+function languageFromHeaders(headers) {
+  return formatBodyForContentType('', headerValue(headers, 'content-type') || '').language;
+}
+
+function highlightStructuredText(text, language = 'plain') {
+  if (language === 'json') {
+    return highlightJson(text);
+  }
+  if (language === 'xml' || language === 'html') {
+    return highlightXml(text);
+  }
+  if (language === 'form') {
+    return highlightForm(text);
+  }
+  return escapeHtml(text);
+}
+
+function highlightJson(text) {
+  const regex = /("(?:\\.|[^"\\])*"(?=\s*:)|"(?:\\.|[^"\\])*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|\b(?:true|false|null)\b)/g;
+  let output = '';
+  let lastIndex = 0;
+  for (const match of text.matchAll(regex)) {
+    const token = match[0];
+    const index = match.index || 0;
+    output += escapeHtml(text.slice(lastIndex, index));
+    let className = 'syntax-json-number';
+    if (token.startsWith('"')) {
+      className = /^\s*:/.test(text.slice(index + token.length)) ? 'syntax-json-key' : 'syntax-json-string';
+    } else if (token === 'true' || token === 'false') {
+      className = 'syntax-json-boolean';
+    } else if (token === 'null') {
+      className = 'syntax-json-null';
+    }
+    output += `<span class="${className}">${escapeHtml(token)}</span>`;
+    lastIndex = index + token.length;
+  }
+  output += escapeHtml(text.slice(lastIndex));
+  return output;
+}
+
+function highlightXml(text) {
+  const regex = /<\/?[\s\S]*?>/g;
+  let output = '';
+  let lastIndex = 0;
+  for (const match of text.matchAll(regex)) {
+    const token = match[0];
+    const index = match.index || 0;
+    output += escapeHtml(text.slice(lastIndex, index));
+    let tag = escapeHtml(token);
+    tag = tag.replace(/(&lt;\/?)([A-Za-z0-9_:-]+)/, '$1<span class="syntax-xml-tag">$2</span>');
+    tag = tag.replace(/([A-Za-z0-9_:-]+)(=)(&quot;.*?&quot;|'.*?')/g, '<span class="syntax-xml-attr">$1</span><span class="syntax-punctuation">$2</span><span class="syntax-xml-string">$3</span>');
+    output += `<span class="syntax-xml-bracket">${tag}</span>`;
+    lastIndex = index + token.length;
+  }
+  output += escapeHtml(text.slice(lastIndex));
+  return output;
+}
+
+function highlightForm(text) {
+  return text
+    .split('\n')
+    .map((line) => {
+      const index = line.indexOf('=');
+      if (index === -1) {
+        return escapeHtml(line);
+      }
+      return `<span class="syntax-form-key">${escapeHtml(line.slice(0, index))}</span><span class="syntax-punctuation">=</span><span class="syntax-form-value">${escapeHtml(line.slice(index + 1))}</span>`;
+    })
+    .join('\n');
 }
 
 function bodyNote(title, detail) {
@@ -816,7 +1306,7 @@ function renderPending() {
         const title = item.stage === 'request' ? item.editable.url : `${item.summary.statusCode || '-'} ${item.summary.url}`;
         const direction = item.stage === 'request' ? '← IN' : '→ OUT';
         return `
-          <button class="pending-item pending-${escapeHtml(item.stage)} ${item.id === state.selectedPendingId ? 'active' : ''}" type="button" data-pending-id="${escapeHtml(item.id)}">
+          <button class="pending-item pending-${escapeHtml(item.stage)} ${item.id === state.selectedPendingId ? 'active' : ''}" type="button" data-pending-id="${escapeHtml(item.id)}" data-echo-flow-id="${escapeHtml(item.flowId)}">
             <span class="stage-pill stage-${escapeHtml(item.stage)}">${escapeHtml(direction)} · ${escapeHtml(item.stage)}</span>
             <span class="pending-item-title" title="${escapeHtml(title)}">${escapeHtml(title)}</span>
             <span class="pending-item-meta">
@@ -843,11 +1333,13 @@ function renderPendingEditor() {
   if (!item) {
     el.emptyPending.classList.remove('hidden');
     el.pendingEditor.classList.add('hidden');
+    delete el.pendingEditor.dataset.echoFlowId;
     return;
   }
 
   el.emptyPending.classList.add('hidden');
   el.pendingEditor.classList.remove('hidden');
+  el.pendingEditor.dataset.echoFlowId = item.flowId;
   el.pendingStage.className = `stage-pill stage-${item.stage}`;
   el.pendingStage.textContent = item.stage === 'request' ? '← REQUEST' : '→ RESPONSE';
   el.pendingTitle.textContent = item.stage === 'request' ? item.editable.url : item.summary.url;
@@ -1204,6 +1696,7 @@ function setView(view) {
     traffic: 'Traffic',
     siteMap: 'Site Map',
     scope: 'Scope',
+    echo: 'Echo',
     intercept: 'Intercept',
     settings: 'Settings',
   };

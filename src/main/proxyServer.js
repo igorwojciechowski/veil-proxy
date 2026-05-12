@@ -130,6 +130,71 @@ class ProxyServer extends EventEmitter {
     return buildSiteMap(this.history, (flow) => this.isFlowInScope(flow));
   }
 
+  async sendEchoRequest(payload = {}) {
+    const request = sanitizeEchoRequest(payload);
+    const targetUrl = new URL(request.url);
+    const body = request.bodyBase64 ? Buffer.from(request.bodyBase64, 'base64') : Buffer.from(request.bodyText || '');
+    const headers = normalizeHeaderObject(request.headers);
+    headers.host = targetUrl.host;
+    if (body.length > 0) {
+      headers['content-length'] = String(body.length);
+    } else {
+      delete headers['content-length'];
+    }
+
+    const startedAt = Date.now();
+    try {
+      const upstreamResponse = await requestViaTransport({
+        targetUrl,
+        method: request.method,
+        headers,
+        body,
+        upstream: this.config.upstream,
+        maxBodyBytes: this.config.maxBodyBytes,
+      });
+      const decoded = decodeBody(upstreamResponse.headers, upstreamResponse.body);
+      const completedAt = Date.now();
+      return {
+        startedAt,
+        completedAt,
+        durationMs: completedAt - startedAt,
+        request: {
+          method: request.method,
+          url: targetUrl.href,
+          headers,
+          bodyBase64: body.toString('base64'),
+          bodyText: request.bodyBase64 ? body.toString('utf8') : request.bodyText || '',
+        },
+        response: {
+          statusCode: upstreamResponse.statusCode,
+          statusMessage: upstreamResponse.statusMessage,
+          headers: headersArrayToObject(upstreamResponse.rawHeaders),
+          bodyBase64: upstreamResponse.body.toString('base64'),
+          bodyText: decoded.text,
+          bodyEncoding: decoded.encoding,
+          bodyTruncated: upstreamResponse.body.truncated,
+        },
+        error: null,
+      };
+    } catch (error) {
+      const completedAt = Date.now();
+      return {
+        startedAt,
+        completedAt,
+        durationMs: completedAt - startedAt,
+        request: {
+          method: request.method,
+          url: targetUrl.href,
+          headers,
+          bodyBase64: body.toString('base64'),
+          bodyText: request.bodyBase64 ? body.toString('utf8') : request.bodyText || '',
+        },
+        response: null,
+        error: error.message,
+      };
+    }
+  }
+
   listPending() {
     return [...this.pending.values()].map((item) => item.public);
   }
@@ -515,6 +580,81 @@ function safeUrlParts(url) {
       scheme: '',
     };
   }
+}
+
+function sanitizeEchoRequest(payload) {
+  const raw = payload && typeof payload === 'object' ? payload : {};
+  if (typeof raw.rawRequest === 'string') {
+    return sanitizeEchoRequestParts(parseRawEchoRequest(raw.rawRequest));
+  }
+
+  return sanitizeEchoRequestParts(raw);
+}
+
+function sanitizeEchoRequestParts(raw) {
+  const method = String(raw.method || 'GET')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9_-]/g, '')
+    .slice(0, 24);
+  const url = String(raw.url || '').trim();
+  if (!/^https?:\/\//i.test(url)) {
+    throw new Error('Echo request URL must be absolute and use http or https.');
+  }
+
+  const headers = raw.headers && typeof raw.headers === 'object' ? raw.headers : {};
+  return {
+    method: method || 'GET',
+    url,
+    headers,
+    bodyText: typeof raw.bodyText === 'string' ? raw.bodyText : '',
+    bodyBase64: typeof raw.bodyBase64 === 'string' ? raw.bodyBase64 : '',
+  };
+}
+
+function parseRawEchoRequest(rawRequest) {
+  const normalized = String(rawRequest || '').replace(/\r\n/g, '\n');
+  const separator = normalized.search(/\n\n/);
+  const head = separator === -1 ? normalized : normalized.slice(0, separator);
+  const bodyText = separator === -1 ? '' : normalized.slice(separator + 2);
+  const lines = head.split('\n').filter((line) => line.trim() || line.includes(':'));
+  const requestLine = lines.shift() || '';
+  const [method, target] = requestLine.trim().split(/\s+/);
+
+  if (!method || !target) {
+    throw new Error('Echo raw request must start with an HTTP request line.');
+  }
+
+  const headers = {};
+  for (const line of lines) {
+    const index = line.indexOf(':');
+    if (index === -1) {
+      continue;
+    }
+    const name = line.slice(0, index).trim().toLowerCase();
+    if (!name) {
+      continue;
+    }
+    headers[name] = line.slice(index + 1).trim();
+  }
+
+  const host = headerValue(headers, 'host');
+  let url = target;
+  if (/^\/\//.test(target)) {
+    url = `http:${target}`;
+  } else if (!/^https?:\/\//i.test(target)) {
+    if (!host) {
+      throw new Error('Echo raw request with relative target requires a Host header.');
+    }
+    url = `http://${host}${target.startsWith('/') ? target : `/${target}`}`;
+  }
+
+  return {
+    method,
+    url,
+    headers,
+    bodyText,
+  };
 }
 
 function flowScopeParts(flow) {
