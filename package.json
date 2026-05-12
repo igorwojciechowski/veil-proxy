@@ -1,0 +1,43 @@
+{
+  "name": "veil-proxy",
+  "version": "0.1.0",
+  "description": "Intercepting web proxy with a desktop UI.",
+  "main": "src/electron/main.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "electron .",
+    "desktop": "electron .",
+    "server": "node src/main/server.js",
+    "test": "node --test test/*.test.js",
+    "package:mac": "CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac dir"
+  },
+  "keywords": [
+    "proxy",
+    "intercept",
+    "http",
+    "electron",
+    "security"
+  ],
+  "author": "",
+  "license": "MIT",
+  "build": {
+    "appId": "dev.veil.proxy",
+    "productName": "Veil Proxy",
+    "asar": true,
+    "files": [
+      "src/**/*",
+      "public/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        "dir"
+      ]
+    }
+  },
+  "devDependencies": {
+    "electron": "^42.0.1",
+    "electron-builder": "^26.8.1"
+  }
+}

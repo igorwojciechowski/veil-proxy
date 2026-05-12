@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Veil Proxy</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">V</div>
+          <div>
+            <div class="brand-name">Veil Proxy</div>
+            <div class="brand-subtitle">Intercepting proxy</div>
+          </div>
+        </div>
+
+        <nav class="nav">
+          <button class="nav-item active" type="button" data-view="traffic" title="Traffic">
+            <span class="nav-icon">⇄</span>
+            <span>Traffic</span>
+          </button>
+          <button class="nav-item" type="button" data-view="siteMap" title="Site Map">
+            <span class="nav-icon">☷</span>
+            <span>Site Map</span>
+          </button>
+          <button class="nav-item" type="button" data-view="scope" title="Scope">
+            <span class="nav-icon">◎</span>
+            <span>Scope</span>
+          </button>
+          <button class="nav-item" type="button" data-view="intercept" title="Intercept">
+            <span class="nav-icon">⏸</span>
+            <span>Intercept</span>
+          </button>
+          <button class="nav-item" type="button" data-view="settings" title="Settings">
+            <span class="nav-icon">⚙</span>
+            <span>Settings</span>
+          </button>
+        </nav>
+
+        <div class="proxy-chip">
+          <span class="dot online"></span>
+          <span id="proxyAddress">127.0.0.1:8080</span>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <h1 id="viewTitle">Traffic</h1>
+            <div class="meta-row">
+              <span id="trafficCount">0 flows</span>
+              <span id="pendingCount">0 pending</span>
+              <span id="upstreamStatus">direct</span>
+            </div>
+          </div>
+          <div class="quick-controls">
+            <div class="intercept-control">
+              <label class="switch-control" title="Pause requests before forwarding">
+                <input id="requestInterceptToggle" type="checkbox" />
+                <span class="switch"></span>
+                <span>Request</span>
+              </label>
+              <button id="requestRulesBtn" class="icon-button" type="button" title="Request intercept rules" aria-label="Request intercept rules">⚙</button>
+            </div>
+            <div class="intercept-control">
+              <label class="switch-control" title="Pause responses before returning">
+                <input id="responseInterceptToggle" type="checkbox" />
+                <span class="switch"></span>
+                <span>Response</span>
+              </label>
+              <button id="responseRulesBtn" class="icon-button" type="button" title="Response intercept rules" aria-label="Response intercept rules">⚙</button>
+            </div>
+          </div>
+        </header>
+
+        <section id="trafficView" class="view active">
+          <div class="split-grid">
+            <section class="panel traffic-panel">
+              <div class="panel-toolbar">
+                <div class="segmented">
+                  <button class="segment active" type="button" data-filter="all">All</button>
+                  <button class="segment" type="button" data-filter="http">HTTP</button>
+                  <button class="segment" type="button" data-filter="connect">CONNECT</button>
+                  <button class="segment" type="button" data-filter="error">Errors</button>
+                </div>
+                <input id="trafficSearch" class="search-input" type="search" placeholder="Filter host, path, method" />
+              </div>
+              <div class="table-wrap">
+                <table class="traffic-table">
+                  <thead>
+                    <tr>
+                      <th>Method</th>
+                      <th>Host</th>
+                      <th>Path</th>
+                      <th>Status</th>
+                      <th>Size</th>
+                      <th>Time</th>
+                    </tr>
+                  </thead>
+                  <tbody id="trafficRows"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="panel detail-panel">
+              <div id="emptyDetail" class="empty-state">Select a flow</div>
+              <div id="flowDetail" class="detail-content hidden">
+                <div class="detail-header">
+                  <div>
+                    <div id="detailMethod" class="method-pill">GET</div>
+                    <h2 id="detailUrl"></h2>
+                  </div>
+                  <div id="detailStatus" class="status-pill"></div>
+                </div>
+
+                <div class="tabs">
+                  <button class="tab active" type="button" data-tab="request">Request</button>
+                  <button class="tab" type="button" data-tab="response">Response</button>
+                  <button class="tab" type="button" data-tab="meta">Meta</button>
+                </div>
+
+                <div id="requestTab" class="tab-page active">
+                  <div class="message-tabs" data-message-tabs="request">
+                    <button class="message-tab active" type="button" data-message="request" data-message-tab="pretty">Pretty</button>
+                    <button class="message-tab" type="button" data-message="request" data-message-tab="raw">Raw</button>
+                  </div>
+                  <div id="requestPretty" class="message-page active" data-message-page="request:pretty">
+                    <div id="requestSummary" class="message-summary"></div>
+                    <section class="message-section">
+                      <h3>Query Parameters</h3>
+                      <div id="requestQuery"></div>
+                    </section>
+                    <section class="message-section">
+                      <h3>Headers</h3>
+                      <div id="requestPrettyHeaders"></div>
+                    </section>
+                    <section class="message-section">
+                      <h3>Body</h3>
+                      <div id="requestBody" class="body-block"></div>
+                    </section>
+                  </div>
+                  <div id="requestRaw" class="message-page" data-message-page="request:raw">
+                    <div class="raw-toolbar">
+                      <span>Raw request</span>
+                      <button class="button ghost copy-button" type="button" data-copy-target="requestRawText">Copy</button>
+                    </div>
+                    <textarea id="requestRawText" class="raw-textarea" spellcheck="false" readonly></textarea>
+                  </div>
+                </div>
+                <div id="responseTab" class="tab-page">
+                  <div class="message-tabs" data-message-tabs="response">
+                    <button class="message-tab active" type="button" data-message="response" data-message-tab="pretty">Pretty</button>
+                    <button class="message-tab" type="button" data-message="response" data-message-tab="raw">Raw</button>
+                  </div>
+                  <div id="responsePretty" class="message-page active" data-message-page="response:pretty">
+                    <div id="responseSummary" class="message-summary"></div>
+                    <section class="message-section">
+                      <h3>Headers</h3>
+                      <div id="responsePrettyHeaders"></div>
+                    </section>
+                    <section class="message-section">
+                      <h3>Body</h3>
+                      <div id="responseBody" class="body-block"></div>
+                    </section>
+                  </div>
+                  <div id="responseRaw" class="message-page" data-message-page="response:raw">
+                    <div class="raw-toolbar">
+                      <span>Raw response</span>
+                      <button class="button ghost copy-button" type="button" data-copy-target="responseRawText">Copy</button>
+                    </div>
+                    <textarea id="responseRawText" class="raw-textarea" spellcheck="false" readonly></textarea>
+                  </div>
+                </div>
+                <div id="metaTab" class="tab-page">
+                  <pre id="metaBody" class="code-block"></pre>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section id="siteMapView" class="view">
+          <div class="site-map-layout">
+            <section class="panel site-hosts-panel">
+              <div class="panel-toolbar">
+                <div>
+                  <h2>Hosts</h2>
+                  <div id="siteMapCount" class="panel-subtitle">0 hosts</div>
+                </div>
+                <label class="inline-check">
+                  <input id="siteMapInScopeOnly" type="checkbox" />
+                  <span>In scope</span>
+                </label>
+              </div>
+              <input id="siteMapSearch" class="search-input site-search" type="search" placeholder="Filter host or path" />
+              <div id="siteHostsList" class="site-list"></div>
+            </section>
+
+            <section class="panel site-paths-panel">
+              <div class="panel-toolbar">
+                <div>
+                  <h2 id="sitePathsTitle">Select a host</h2>
+                  <div id="sitePathsSubtitle" class="panel-subtitle">No host selected</div>
+                </div>
+                <button id="refreshSiteMapBtn" class="button ghost compact-button" type="button">Refresh</button>
+              </div>
+              <div id="sitePathsList" class="site-path-list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="interceptView" class="view">
+          <div class="intercept-layout">
+            <div class="intercept-sidebar">
+              <section class="panel queue-panel">
+                <div class="panel-title-row">
+                  <h2>Queue</h2>
+                  <span id="queueBadge" class="badge">0</span>
+                </div>
+                <div id="pendingList" class="pending-list"></div>
+              </section>
+            </div>
+
+            <section class="panel editor-panel">
+              <div id="emptyPending" class="empty-state">No paused messages</div>
+              <div id="pendingEditor" class="pending-editor hidden">
+                <div class="editor-top">
+                  <div class="editor-heading">
+                    <div id="pendingStage" class="stage-pill">request</div>
+                    <h2 id="pendingTitle"></h2>
+                    <div class="editor-subtitle">Paused message ready to continue, drop, or modify</div>
+                  </div>
+                  <div class="button-row">
+                    <button id="continueBtn" class="button ghost" type="button">Continue</button>
+                    <button id="dropBtn" class="button danger" type="button">Drop</button>
+                    <button id="modifyBtn" class="button primary" type="button">Modify</button>
+                  </div>
+                </div>
+
+                <div class="editor-surface">
+                  <section class="editor-section line-editor-section">
+                    <div class="editor-section-title">Line</div>
+                    <div id="requestFields" class="field-grid editor-line-grid">
+                      <label>
+                        Method
+                        <input id="editMethod" type="text" autocomplete="off" />
+                      </label>
+                      <label class="wide">
+                        URL
+                        <input id="editUrl" type="url" autocomplete="off" />
+                      </label>
+                    </div>
+
+                    <div id="responseFields" class="field-grid editor-line-grid hidden">
+                      <label>
+                        Status
+                        <input id="editStatusCode" type="number" min="100" max="599" autocomplete="off" />
+                      </label>
+                      <label class="wide">
+                        Message
+                        <input id="editStatusMessage" type="text" autocomplete="off" />
+                      </label>
+                    </div>
+                  </section>
+
+                  <section class="editor-section headers-editor-section">
+                    <div class="editor-section-title">Headers</div>
+                    <textarea id="editHeaders" class="editor-textarea headers-textarea" spellcheck="false" placeholder="Header-Name: value"></textarea>
+                  </section>
+
+                  <section class="editor-section body-editor-section">
+                    <div class="editor-section-title">Body</div>
+                    <textarea id="editBody" class="editor-textarea body-textarea" spellcheck="false" placeholder="No body captured. Add or edit body content here before modifying the message."></textarea>
+                  </section>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section id="scopeView" class="view">
+          <div class="scope-view-layout">
+            <section class="panel scope-control-panel">
+              <div class="panel-title-row">
+                <div>
+                  <h2>Scope</h2>
+                  <div id="scopeStatus" class="panel-subtitle">Scope disabled</div>
+                </div>
+                <button id="saveScopeBtn" class="button primary" type="button">Apply scope</button>
+              </div>
+              <label class="scope-toggle">
+                <input id="scopeEnabledToggle" type="checkbox" />
+                <span>Enable scope filtering</span>
+              </label>
+            </section>
+
+            <section class="panel scope-rules-panel">
+              <div class="panel-title-row">
+                <div>
+                  <h2>Include</h2>
+                  <div id="includeScopeCount" class="panel-subtitle">0 rules</div>
+                </div>
+                <button id="addIncludeScopeRuleBtn" class="button ghost compact-button" type="button">+ Include</button>
+              </div>
+              <div id="includeScopeRulesList" class="rules-list scope-rules-list"></div>
+            </section>
+
+            <section class="panel scope-rules-panel">
+              <div class="panel-title-row">
+                <div>
+                  <h2>Exclude</h2>
+                  <div id="excludeScopeCount" class="panel-subtitle">0 rules</div>
+                </div>
+                <button id="addExcludeScopeRuleBtn" class="button ghost compact-button" type="button">+ Exclude</button>
+              </div>
+              <div id="excludeScopeRulesList" class="rules-list scope-rules-list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="settingsView" class="view">
+          <div class="settings-grid">
+            <section class="panel settings-panel">
+              <div class="panel-title-row">
+                <h2>Proxy</h2>
+                <button id="saveProxyBtn" class="button primary" type="button">Apply</button>
+              </div>
+              <div class="field-grid">
+                <label>
+                  Host
+                  <input id="proxyHost" type="text" disabled />
+                </label>
+                <label>
+                  Port
+                  <input id="proxyPort" type="number" min="1" max="65535" autocomplete="off" />
+                </label>
+              </div>
+              <div id="proxySaveStatus" class="hint-line">Changing the port rebinds the proxy listener immediately.</div>
+            </section>
+
+            <section class="panel settings-panel">
+              <div class="panel-title-row">
+                <h2>Upstream</h2>
+                <button id="saveConfigBtn" class="button primary" type="button">Save</button>
+              </div>
+              <div class="field-grid">
+                <label>
+                  Mode
+                  <select id="upstreamMode">
+                    <option value="direct">Direct</option>
+                    <option value="http">HTTP proxy</option>
+                    <option value="socks5">SOCKS5</option>
+                  </select>
+                </label>
+                <label>
+                  Host
+                  <input id="upstreamHost" type="text" autocomplete="off" />
+                </label>
+                <label>
+                  Port
+                  <input id="upstreamPort" type="number" min="0" max="65535" autocomplete="off" />
+                </label>
+                <label>
+                  Username
+                  <input id="upstreamUsername" type="text" autocomplete="off" />
+                </label>
+                <label>
+                  Password
+                  <input id="upstreamPassword" type="password" autocomplete="off" />
+                </label>
+              </div>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="rulesModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="rulesModalTitle">
+      <div id="rulesBackdrop" class="modal-backdrop"></div>
+      <section class="modal-dialog rules-dialog">
+        <header class="modal-header">
+          <div>
+            <div id="rulesStagePill" class="stage-pill stage-request">REQUEST</div>
+            <h2 id="rulesModalTitle">Request Intercept Rules</h2>
+            <p id="rulesModalSubtitle">No active request rules means all requests are intercepted while Request is enabled.</p>
+          </div>
+          <button id="closeRulesBtn" class="icon-button" type="button" title="Close rules" aria-label="Close rules">×</button>
+        </header>
+        <div class="modal-toolbar">
+          <button id="addRuleBtn" class="button ghost compact-button" type="button">+ Rule</button>
+          <span id="rulesCount" class="rules-count">0 rules</span>
+        </div>
+        <div id="rulesList" class="rules-list modal-rules-list"></div>
+        <footer class="modal-footer">
+          <button id="cancelRulesBtn" class="button ghost" type="button">Cancel</button>
+          <button id="saveRulesBtn" class="button primary" type="button">Save rules</button>
+        </footer>
+      </section>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
