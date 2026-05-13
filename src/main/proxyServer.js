@@ -1,7 +1,9 @@
 const http = require('http');
 const net = require('net');
+const tls = require('tls');
 const { EventEmitter } = require('events');
 const { closeIdleTransports, createTunnel, requestViaTransport } = require('./transport');
+const { CertificateAuthority } = require('./certAuthority');
 const {
   decodeBody,
   encodeBodyForClient,
@@ -21,6 +23,9 @@ class ProxyServer extends EventEmitter {
     this.pendingCounter = 1;
     this.flowCounter = 1;
     this.port = this.config.proxyPort;
+    this.certAuthority = new CertificateAuthority(this.config.https && this.config.https.certDir);
+    this.mitmTargets = new WeakMap();
+    this.mitmHttpServer = http.createServer(this.handleMitmHttpRequest.bind(this));
   }
 
   createHttpServer() {
@@ -53,6 +58,7 @@ class ProxyServer extends EventEmitter {
     const upstream = nextConfig.upstream || {};
     const intercept = nextConfig.intercept || {};
     const scope = nextConfig.scope || {};
+    const https = nextConfig.https || {};
     const nextHost = Object.prototype.hasOwnProperty.call(nextConfig, 'proxyHost')
       ? normalizeProxyHost(nextConfig.proxyHost)
       : this.config.proxyHost;
@@ -84,9 +90,23 @@ class ProxyServer extends EventEmitter {
             }
           : this.config.scope,
       ),
+      https: {
+        ...this.config.https,
+        ...https,
+      },
+      upstreams: Object.prototype.hasOwnProperty.call(nextConfig, 'upstreams')
+        ? sanitizeUpstreams(nextConfig.upstreams)
+        : this.config.upstreams || [],
+      upstreamRules: Object.prototype.hasOwnProperty.call(nextConfig, 'upstreamRules')
+        ? sanitizeUpstreamRules(nextConfig.upstreamRules)
+        : this.config.upstreamRules || [],
     };
 
-    if (Object.prototype.hasOwnProperty.call(nextConfig, 'upstream')) {
+    if (
+      Object.prototype.hasOwnProperty.call(nextConfig, 'upstream') ||
+      Object.prototype.hasOwnProperty.call(nextConfig, 'upstreams') ||
+      Object.prototype.hasOwnProperty.call(nextConfig, 'upstreamRules')
+    ) {
       closeIdleTransports();
     }
 
@@ -95,6 +115,10 @@ class ProxyServer extends EventEmitter {
     }
 
     this.config = candidate;
+
+    if (Object.prototype.hasOwnProperty.call(https, 'certDir') && https.certDir !== this.certAuthority.certDir) {
+      this.certAuthority = new CertificateAuthority(https.certDir);
+    }
 
     if (!this.config.intercept.requests) {
       this.continuePendingStage('request');
@@ -149,8 +173,9 @@ class ProxyServer extends EventEmitter {
         method: request.method,
         headers,
         body,
-        upstream: this.config.upstream,
+        upstream: this.resolveUpstream(targetUrl),
         maxBodyBytes: this.config.maxBodyBytes,
+        ignoreCertificateErrors: Boolean(this.config.https && this.config.https.ignoreUpstreamCertificateErrors),
       });
       const decoded = decodeBody(upstreamResponse.headers, upstreamResponse.body);
       const completedAt = Date.now();
@@ -226,11 +251,11 @@ class ProxyServer extends EventEmitter {
     }
   }
 
-  async handleHttpRequest(clientReq, clientRes) {
+  async handleHttpRequest(clientReq, clientRes, forcedTarget = null) {
     const startedAt = Date.now();
     const id = String(this.flowCounter++);
     const body = await readBody(clientReq, this.config.maxBodyBytes);
-    const target = parseProxyTarget(clientReq);
+    const target = parseProxyTarget(clientReq, forcedTarget);
 
     if (!target) {
       clientRes.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' });
@@ -290,8 +315,9 @@ class ProxyServer extends EventEmitter {
         method: flow.request.method,
         headers: normalizeHeaderObject(flow.request.headers),
         body: Buffer.from(flow.request.bodyBase64 || '', 'base64'),
-        upstream: this.config.upstream,
+        upstream: this.resolveUpstream(new URL(flow.request.url)),
         maxBodyBytes: this.config.maxBodyBytes,
+        ignoreCertificateErrors: Boolean(this.config.https && this.config.https.ignoreUpstreamCertificateErrors),
       });
 
       const decoded = decodeBody(upstreamResponse.headers, upstreamResponse.body);
@@ -388,17 +414,24 @@ class ProxyServer extends EventEmitter {
         bytesDown: 0,
       },
       error: null,
-      notes: ['TLS CONNECT is tunnelled. HTTP interception and modification apply to plaintext HTTP traffic in this MVP.'],
+      notes: [],
     };
 
     this.addHistory(flow);
     this.emit('history', this.summarizeFlow(flow));
 
+    if (this.shouldMitmConnect(host, port)) {
+      this.handleHttpsMitmConnect(flow, clientSocket, head);
+      return;
+    }
+
+    flow.notes.push('TLS CONNECT is tunnelled without HTTPS interception.');
+
     try {
       const tunnel = await createTunnel({
         host,
         port,
-        upstream: this.config.upstream,
+        upstream: this.resolveUpstreamForConnect(host, port),
       });
 
       clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
@@ -438,6 +471,100 @@ class ProxyServer extends EventEmitter {
       this.emit('history', this.summarizeFlow(flow));
       clientSocket.end('HTTP/1.1 502 Bad Gateway\r\ncontent-type: text/plain\r\n\r\nVeil Proxy CONNECT error\r\n');
     }
+  }
+
+  shouldMitmConnect(host, port) {
+    const ports = Array.isArray(this.config.https && this.config.https.interceptPorts)
+      ? this.config.https.interceptPorts.map((item) => Number(item))
+      : [443];
+    return Boolean(this.config.https && this.config.https.intercept && host && ports.includes(Number(port || 443)));
+  }
+
+  handleHttpsMitmConnect(flow, clientSocket, head) {
+    const startedAt = flow.startedAt;
+    flow.notes.push('HTTPS MITM enabled. Decrypted requests are recorded as HTTPS flows.');
+
+    try {
+      const context = this.certAuthority.getSecureContext(flow.tunnel.host);
+      clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+      if (head && head.length > 0) {
+        clientSocket.unshift(head);
+      }
+
+      const tlsSocket = new tls.TLSSocket(clientSocket, {
+        isServer: true,
+        secureContext: context,
+        ALPNProtocols: ['http/1.1'],
+      });
+
+      this.mitmTargets.set(tlsSocket, {
+        host: flow.tunnel.host,
+        port: flow.tunnel.port,
+      });
+
+      const finalize = () => {
+        if (!flow.completedAt) {
+          flow.completedAt = Date.now();
+          flow.durationMs = flow.completedAt - startedAt;
+          this.emit('history', this.summarizeFlow(flow));
+        }
+      };
+
+      tlsSocket.once('secure', () => {
+        this.mitmHttpServer.emit('connection', tlsSocket);
+      });
+      tlsSocket.on('data', (chunk) => {
+        flow.tunnel.bytesUp += chunk.length;
+      });
+      tlsSocket.on('error', (error) => {
+        flow.error = error.message;
+      });
+      tlsSocket.on('close', finalize);
+    } catch (error) {
+      flow.error = error.message;
+      flow.completedAt = Date.now();
+      flow.durationMs = flow.completedAt - startedAt;
+      this.emit('history', this.summarizeFlow(flow));
+      clientSocket.end('HTTP/1.1 502 Bad Gateway\r\ncontent-type: text/plain\r\n\r\nVeil Proxy HTTPS MITM error\r\n');
+    }
+  }
+
+  handleMitmHttpRequest(clientReq, clientRes) {
+    const target = this.mitmTargets.get(clientReq.socket);
+    this.handleHttpRequest(clientReq, clientRes, target);
+  }
+
+  resolveUpstream(targetUrl) {
+    const upstreams = this.effectiveUpstreams();
+    const match = upstreams.find((upstream) => {
+      if (upstream.enabled === false) return false;
+      const rules = Array.isArray(upstream.rules) ? upstream.rules : [];
+      return rules.length === 0 || rules.some((rule) => upstreamRuleMatches(rule, targetUrl));
+    });
+    return match ? normalizeUpstream(match) : directUpstream();
+  }
+
+  resolveUpstreamForConnect(host, port) {
+    const targetUrl = new URL(`https://${host}${Number(port || 443) === 443 ? '' : `:${Number(port)}`}/`);
+    return this.resolveUpstream(targetUrl);
+  }
+
+  effectiveUpstreams() {
+    if (Array.isArray(this.config.upstreams) && this.config.upstreams.length > 0) {
+      return this.config.upstreams.map((upstream) => normalizeConfiguredUpstream(upstream));
+    }
+
+    const legacyRules = Array.isArray(this.config.upstreamRules) ? this.config.upstreamRules : [];
+    if (legacyRules.length > 0) {
+      return legacyRules.map((rule) => ({
+        ...normalizeUpstream(rule.upstream),
+        enabled: rule.enabled !== false,
+        rules: [{ matchType: rule.matchType, pattern: rule.pattern, includeSubdomains: rule.includeSubdomains }],
+      }));
+    }
+
+    const legacy = normalizeUpstream(this.config.upstream);
+    return legacy.mode === 'direct' ? [] : [{ ...legacy, enabled: true, rules: [] }];
   }
 
   addHistory(flow) {
@@ -536,10 +663,16 @@ function normalizeProxyPort(value) {
   return port;
 }
 
-function parseProxyTarget(req) {
+function parseProxyTarget(req, forcedTarget = null) {
   try {
     if (/^https?:\/\//i.test(req.url)) {
       return new URL(req.url);
+    }
+
+    if (forcedTarget && forcedTarget.host) {
+      const port = Number(forcedTarget.port || 443);
+      const defaultPort = port === 443 ? '' : `:${port}`;
+      return new URL(req.url || '/', `https://${forcedTarget.host}${defaultPort}`);
     }
 
     const host = req.headers.host;
@@ -610,6 +743,99 @@ function sanitizeEchoRequestParts(raw) {
     bodyText: typeof raw.bodyText === 'string' ? raw.bodyText : '',
     bodyBase64: typeof raw.bodyBase64 === 'string' ? raw.bodyBase64 : '',
   };
+}
+
+function sanitizeUpstreamRules(rawRules) {
+  if (!Array.isArray(rawRules)) return [];
+  return rawRules
+    .map((rule, index) => {
+      const raw = rule && typeof rule === 'object' ? rule : {};
+      const matchType = ['host', 'domain', 'url'].includes(raw.matchType) ? raw.matchType : 'domain';
+      const pattern = String(raw.pattern || '').trim();
+      if (!pattern) return null;
+      return {
+        id: String(raw.id || `upstream-rule-${index + 1}`),
+        enabled: raw.enabled !== false,
+        matchType,
+        pattern,
+        includeSubdomains: raw.includeSubdomains !== false,
+        upstream: normalizeUpstream(raw.upstream),
+      };
+    })
+    .filter(Boolean);
+}
+
+function sanitizeUpstreams(rawUpstreams) {
+  if (!Array.isArray(rawUpstreams)) return [];
+  return rawUpstreams.map((upstream, index) => normalizeConfiguredUpstream({ ...upstream, id: upstream.id || `upstream-${index + 1}` }));
+}
+
+function normalizeConfiguredUpstream(raw = {}) {
+  return {
+    ...normalizeUpstream(raw),
+    id: String(raw.id || `upstream-${Date.now()}`),
+    enabled: raw.enabled !== false,
+    rules: sanitizeUpstreamRouteRules(raw.rules),
+  };
+}
+
+function sanitizeUpstreamRouteRules(rawRules) {
+  if (!Array.isArray(rawRules)) return [];
+  return rawRules
+    .map((rule) => {
+      const raw = rule && typeof rule === 'object' ? rule : {};
+      const pattern = String(raw.pattern || '').trim();
+      if (!pattern) return null;
+      return {
+        matchType: ['host', 'domain', 'url'].includes(raw.matchType) ? raw.matchType : 'domain',
+        pattern,
+        includeSubdomains: raw.includeSubdomains !== false,
+      };
+    })
+    .filter(Boolean);
+}
+
+function normalizeUpstream(raw = {}) {
+  const mode = ['direct', 'http', 'socks5'].includes(raw.mode) ? raw.mode : 'direct';
+  return {
+    mode,
+    host: String(raw.host || '').trim(),
+    port: Number(raw.port || 0),
+    username: String(raw.username || ''),
+    password: String(raw.password || ''),
+  };
+}
+
+function directUpstream() {
+  return { mode: 'direct', host: '', port: 0, username: '', password: '' };
+}
+
+function upstreamRuleMatches(rule, targetUrl) {
+  if (!targetUrl) return false;
+  if (rule.matchType === 'url') {
+    return wildcardMatches(rule.pattern, targetUrl.href);
+  }
+  const host = targetUrl.hostname.toLowerCase();
+  const pattern = String(rule.pattern || '').toLowerCase();
+  if (rule.matchType === 'host') {
+    return wildcardMatches(pattern, targetUrl.host.toLowerCase()) || wildcardMatches(pattern, host);
+  }
+  if (pattern.startsWith('*.')) {
+    const suffix = pattern.slice(2);
+    return host === suffix || host.endsWith(`.${suffix}`);
+  }
+  if (pattern.includes('*')) {
+    return wildcardMatches(pattern, host);
+  }
+  return host === pattern || (rule.includeSubdomains !== false && host.endsWith(`.${pattern}`));
+}
+
+function wildcardMatches(pattern, value) {
+  const escaped = String(pattern || '')
+    .split('*')
+    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('.*');
+  return new RegExp(`^${escaped}$`, 'i').test(String(value || ''));
 }
 
 function parseRawEchoRequest(rawRequest) {
@@ -753,7 +979,7 @@ function matchesScope(scope, flow) {
 function matchesScopeRule(rule, flow) {
   const parts = flowScopeParts(flow);
   let candidate = '';
-  if (rule.field === 'url') candidate = parts.url;
+  if (rule.field === 'url') candidate = parts.scheme && parts.host ? `${parts.scheme}://${parts.host}${parts.path || '/'}` : parts.url;
   if (rule.field === 'host') candidate = parts.host;
   if (rule.field === 'path') candidate = parts.path;
   if (rule.field === 'method') candidate = flow.request.method || '';

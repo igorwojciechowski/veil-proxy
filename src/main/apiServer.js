@@ -68,6 +68,11 @@ class ApiServer {
         return;
       }
 
+      if (parsed.pathname === '/api/https/ca-cert' && req.method === 'GET') {
+        this.serveCaCertificate(res);
+        return;
+      }
+
       if (parsed.pathname === '/api/history' && req.method === 'GET') {
         this.json(res, this.proxy.listHistory());
         return;
@@ -165,6 +170,27 @@ class ApiServer {
         return;
       }
       res.writeHead(200, { 'content-type': contentType(filePath) });
+      res.end(content);
+    });
+  }
+
+  serveCaCertificate(res) {
+    const caCertPath = this.proxy.certAuthority && this.proxy.certAuthority.caCertPath;
+    if (!caCertPath) {
+      this.notFound(res);
+      return;
+    }
+
+    fs.readFile(caCertPath, (error, content) => {
+      if (error) {
+        this.notFound(res);
+        return;
+      }
+      res.writeHead(200, {
+        'content-type': 'application/x-x509-ca-cert',
+        'content-disposition': 'attachment; filename="veil-proxy-ca.crt"',
+        'cache-control': 'no-store',
+      });
       res.end(content);
     });
   }

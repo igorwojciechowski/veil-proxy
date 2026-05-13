@@ -29,6 +29,16 @@ async function createWindow() {
     minHeight: 720,
     backgroundColor: '#03191b',
     title: 'Veil Proxy',
+    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'hidden',
+    trafficLightPosition: process.platform === 'darwin' ? { x: 14, y: 10 } : undefined,
+    titleBarOverlay:
+      process.platform === 'darwin'
+        ? undefined
+        : {
+            color: '#03191b',
+            symbolColor: '#78bdb8',
+            height: 32,
+          },
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -45,7 +55,7 @@ async function createWindow() {
     mainWindow = null;
   });
 
-  await mainWindow.loadURL(`http://127.0.0.1:${state.apiPort}`);
+  await mainWindow.loadURL(`http://127.0.0.1:${state.apiPort}?desktop=1`);
 }
 
 app.whenReady().then(createWindow);

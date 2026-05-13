@@ -9,19 +9,19 @@ const httpSocketPool = new Map();
 const HTTP_POOL_IDLE_MS = 20_000;
 const HTTP_POOL_MAX_IDLE_PER_KEY = 6;
 
-function createTransport(targetUrl, upstream) {
+function createTransport(targetUrl, upstream, options = {}) {
   if (!upstream || upstream.mode === 'direct') {
     const port = Number(targetUrl.port || (targetUrl.protocol === 'https:' ? 443 : 80));
-    return connectDirect(targetUrl.hostname, port, targetUrl.protocol === 'https:');
+    return connectDirect(targetUrl.hostname, port, targetUrl.protocol === 'https:', options);
   }
 
   if (upstream.mode === 'http') {
-    return connectViaHttpProxy(targetUrl, upstream);
+    return connectViaHttpProxy(targetUrl, upstream, options);
   }
 
   if (upstream.mode === 'socks5') {
     const port = Number(targetUrl.port || (targetUrl.protocol === 'https:' ? 443 : 80));
-    return connectViaSocks5(targetUrl.hostname, port, targetUrl.protocol === 'https:', upstream);
+    return connectViaSocks5(targetUrl.hostname, port, targetUrl.protocol === 'https:', upstream, options);
   }
 
   throw new Error(`Unsupported upstream mode: ${upstream.mode}`);
@@ -43,13 +43,22 @@ function createTunnel({ host, port, upstream }) {
   throw new Error(`Unsupported upstream mode: ${upstream.mode}`);
 }
 
-async function requestViaTransport({ targetUrl, method, headers, body, upstream, maxBodyBytes }) {
+async function requestViaTransport({
+  targetUrl,
+  method,
+  headers,
+  body,
+  upstream,
+  maxBodyBytes,
+  ignoreCertificateErrors = false,
+}) {
   if (targetUrl.protocol === 'http:' && (!upstream || upstream.mode === 'direct')) {
     return requestHttpDirect({ targetUrl, method, headers, body, maxBodyBytes });
   }
 
   const poolKey = reusableHttpPoolKey(targetUrl, upstream);
-  const socket = (poolKey && takePooledSocket(poolKey)) || (await createTransport(targetUrl, upstream));
+  const socket =
+    (poolKey && takePooledSocket(poolKey)) || (await createTransport(targetUrl, upstream, { ignoreCertificateErrors }));
   const requestPath =
     upstream && upstream.mode === 'http' && targetUrl.protocol === 'http:'
       ? targetUrl.href
@@ -203,7 +212,7 @@ function requestHttpDirect({ targetUrl, method, headers, body, maxBodyBytes }) {
   });
 }
 
-function connectDirect(host, port, secure) {
+function connectDirect(host, port, secure, options = {}) {
   return new Promise((resolve, reject) => {
     const socket = net.connect({ host, port });
     socket.once('error', reject);
@@ -214,10 +223,7 @@ function connectDirect(host, port, secure) {
         return;
       }
 
-      const tlsSocket = tls.connect({
-        socket,
-        servername: host,
-      });
+      const tlsSocket = tls.connect(tlsConnectionOptions(socket, host, options));
       tlsSocket.once('error', reject);
       tlsSocket.once('secureConnect', () => {
         tlsSocket.off('error', reject);
@@ -227,7 +233,7 @@ function connectDirect(host, port, secure) {
   });
 }
 
-async function connectViaHttpProxy(targetUrl, upstream) {
+async function connectViaHttpProxy(targetUrl, upstream, options = {}) {
   if (targetUrl.protocol === 'http:') {
     return connectDirect(upstream.host, Number(upstream.port), false);
   }
@@ -238,10 +244,11 @@ async function connectViaHttpProxy(targetUrl, upstream) {
     upstream,
     true,
     targetUrl.hostname,
+    options,
   );
 }
 
-function connectHttpProxyTunnel(host, port, upstream, secureAfterConnect = false, servername = host) {
+function connectHttpProxyTunnel(host, port, upstream, secureAfterConnect = false, servername = host, options = {}) {
   return new Promise((resolve, reject) => {
     const socket = net.connect({ host: upstream.host, port: Number(upstream.port) });
     socket.once('error', reject);
@@ -269,7 +276,7 @@ function connectHttpProxyTunnel(host, port, upstream, secureAfterConnect = false
           return;
         }
 
-        const tlsSocket = tls.connect({ socket, servername });
+        const tlsSocket = tls.connect(tlsConnectionOptions(socket, servername, options));
         tlsSocket.once('error', reject);
         tlsSocket.once('secureConnect', () => {
           tlsSocket.off('error', reject);
@@ -280,7 +287,7 @@ function connectHttpProxyTunnel(host, port, upstream, secureAfterConnect = false
   });
 }
 
-function connectViaSocks5(host, port, secure, upstream) {
+function connectViaSocks5(host, port, secure, upstream, options = {}) {
   return new Promise((resolve, reject) => {
     const socket = net.connect({ host: upstream.host, port: Number(upstream.port) });
     socket.once('error', reject);
@@ -341,7 +348,7 @@ function connectViaSocks5(host, port, secure, upstream) {
           return;
         }
 
-        const tlsSocket = tls.connect({ socket, servername: host });
+        const tlsSocket = tls.connect(tlsConnectionOptions(socket, host, options));
         tlsSocket.once('error', reject);
         tlsSocket.once('secureConnect', () => {
           tlsSocket.off('error', reject);
@@ -372,6 +379,17 @@ function encodeSocksAddress(host) {
     throw new Error('SOCKS5 host name is too long.');
   }
   return Buffer.concat([Buffer.from([0x03, hostBuffer.length]), hostBuffer]);
+}
+
+function tlsConnectionOptions(socket, servername, options = {}) {
+  const tlsOptions = {
+    socket,
+    rejectUnauthorized: !options.ignoreCertificateErrors,
+  };
+  if (!net.isIP(servername)) {
+    tlsOptions.servername = servername;
+  }
+  return tlsOptions;
 }
 
 function encodeIpv4(host) {

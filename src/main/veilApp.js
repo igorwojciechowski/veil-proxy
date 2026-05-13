@@ -19,6 +19,12 @@ function createApp(options = {}) {
       ...defaultConfig.scope,
       ...(options.config && options.config.scope ? options.config.scope : {}),
     },
+    https: {
+      ...defaultConfig.https,
+      ...(options.config && options.config.https ? options.config.https : {}),
+    },
+    upstreams: Array.isArray(options.config && options.config.upstreams) ? options.config.upstreams : defaultConfig.upstreams,
+    upstreamRules: Array.isArray(options.config && options.config.upstreamRules) ? options.config.upstreamRules : defaultConfig.upstreamRules,
   };
 
   const proxy = new ProxyServer(config);

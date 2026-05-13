@@ -1,3 +1,6 @@
+const os = require('os');
+const path = require('path');
+
 const defaultConfig = {
   apiHost: '127.0.0.1',
   apiPort: Number(process.env.VEIL_API_PORT || 8999),
@@ -14,6 +17,12 @@ const defaultConfig = {
     enabled: false,
     rules: [],
   },
+  https: {
+    intercept: true,
+    interceptPorts: [443],
+    certDir: process.env.VEIL_CERT_DIR || path.join(os.tmpdir(), 'veil-proxy-certs'),
+    ignoreUpstreamCertificateErrors: true,
+  },
   upstream: {
     mode: 'direct',
     host: '',
@@ -21,6 +30,8 @@ const defaultConfig = {
     username: '',
     password: '',
   },
+  upstreams: [],
+  upstreamRules: [],
 };
 
 module.exports = {

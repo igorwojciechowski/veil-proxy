@@ -1,3 +1,7 @@
+if (new URLSearchParams(window.location.search).get('desktop') === '1') {
+  document.documentElement.classList.add('desktop-shell');
+}
+
 const state = {
   config: null,
   history: [],
@@ -5,8 +9,25 @@ const state = {
   selectedFlowId: null,
   selectedFlow: null,
   selectedPendingId: null,
-  trafficFilter: 'all',
+  pendingEditorMode: 'raw',
   trafficSearch: '',
+  trafficFilters: {
+    method: [],
+    status: [],
+    host: [],
+  },
+  trafficInScopeOnly: false,
+  openTrafficFilter: '',
+  trafficSort: {
+    key: 'id',
+    direction: 'desc',
+  },
+  trafficLayout: {
+    orientation: 'horizontal',
+    showList: true,
+    showDetail: true,
+    splitSize: 58,
+  },
   activeTab: 'request',
   messageTabs: {
     request: 'pretty',
@@ -17,8 +38,13 @@ const state = {
   siteMapSearch: '',
   siteMapInScopeOnly: false,
   echoTabs: [],
+  echoGroups: [],
+  selectedEchoGroupId: null,
   selectedEchoTabId: null,
+  openEchoColorPicker: null,
+  echoSplit: 50,
   echoContextFlowId: null,
+  contextFlowId: null,
   rulesModalStage: 'request',
 };
 
@@ -30,8 +56,20 @@ const el = {
   proxyAddress: document.querySelector('#proxyAddress'),
   requestInterceptToggle: document.querySelector('#requestInterceptToggle'),
   responseInterceptToggle: document.querySelector('#responseInterceptToggle'),
+  trafficSplit: document.querySelector('#trafficSplit'),
+  trafficPaneResizer: document.querySelector('#trafficPaneResizer'),
   trafficRows: document.querySelector('#trafficRows'),
   trafficSearch: document.querySelector('#trafficSearch'),
+  trafficMethodFilter: document.querySelector('#trafficMethodFilter'),
+  trafficStatusFilter: document.querySelector('#trafficStatusFilter'),
+  trafficHostFilter: document.querySelector('#trafficHostFilter'),
+  trafficScopeFilter: document.querySelector('#trafficScopeFilter'),
+  resetTrafficFiltersBtn: document.querySelector('#resetTrafficFiltersBtn'),
+  trafficFilterCount: document.querySelector('#trafficFilterCount'),
+  trafficHorizontalLayoutBtn: document.querySelector('#trafficHorizontalLayoutBtn'),
+  trafficVerticalLayoutBtn: document.querySelector('#trafficVerticalLayoutBtn'),
+  showTrafficListToggle: document.querySelector('#showTrafficListToggle'),
+  showTrafficDetailToggle: document.querySelector('#showTrafficDetailToggle'),
   siteMapCount: document.querySelector('#siteMapCount'),
   siteMapSearch: document.querySelector('#siteMapSearch'),
   siteMapInScopeOnly: document.querySelector('#siteMapInScopeOnly'),
@@ -41,19 +79,24 @@ const el = {
   sitePathsList: document.querySelector('#sitePathsList'),
   refreshSiteMapBtn: document.querySelector('#refreshSiteMapBtn'),
   echoTabs: document.querySelector('#echoTabs'),
+  echoGroupList: document.querySelector('#echoGroupList'),
   newEchoTabBtn: document.querySelector('#newEchoTabBtn'),
+  newEchoGroupBtn: document.querySelector('#newEchoGroupBtn'),
   emptyEcho: document.querySelector('#emptyEcho'),
   echoWorkspace: document.querySelector('#echoWorkspace'),
+  echoPaneResizer: document.querySelector('#echoPaneResizer'),
   echoRequestSubtitle: document.querySelector('#echoRequestSubtitle'),
+  echoTabName: document.querySelector('#echoTabName'),
   echoRawRequest: document.querySelector('#echoRawRequest'),
   echoRawRequestHighlight: document.querySelector('#echoRawRequestHighlight'),
-  closeEchoTabBtn: document.querySelector('#closeEchoTabBtn'),
   sendEchoBtn: document.querySelector('#sendEchoBtn'),
   echoResponseStatus: document.querySelector('#echoResponseStatus'),
   echoResponseMeta: document.querySelector('#echoResponseMeta'),
   echoRawResponse: document.querySelector('#echoRawResponse'),
   contextMenu: document.querySelector('#contextMenu'),
   sendToEchoContextBtn: document.querySelector('#sendToEchoContextBtn'),
+  addToScopeContextBtn: document.querySelector('#addToScopeContextBtn'),
+  removeFromScopeContextBtn: document.querySelector('#removeFromScopeContextBtn'),
   emptyDetail: document.querySelector('#emptyDetail'),
   flowDetail: document.querySelector('#flowDetail'),
   detailMethod: document.querySelector('#detailMethod'),
@@ -83,6 +126,10 @@ const el = {
   editStatusMessage: document.querySelector('#editStatusMessage'),
   editHeaders: document.querySelector('#editHeaders'),
   editBody: document.querySelector('#editBody'),
+  pendingRawBtn: document.querySelector('#pendingRawBtn'),
+  pendingPrettyBtn: document.querySelector('#pendingPrettyBtn'),
+  pendingRawView: document.querySelector('#pendingRawView'),
+  pendingPrettyView: document.querySelector('#pendingPrettyView'),
   continueBtn: document.querySelector('#continueBtn'),
   dropBtn: document.querySelector('#dropBtn'),
   modifyBtn: document.querySelector('#modifyBtn'),
@@ -117,6 +164,8 @@ const el = {
   upstreamPort: document.querySelector('#upstreamPort'),
   upstreamUsername: document.querySelector('#upstreamUsername'),
   upstreamPassword: document.querySelector('#upstreamPassword'),
+  upstreamRulesList: document.querySelector('#upstreamRulesList'),
+  addUpstreamRuleBtn: document.querySelector('#addUpstreamRuleBtn'),
   saveConfigBtn: document.querySelector('#saveConfigBtn'),
 };
 
@@ -133,14 +182,6 @@ async function init() {
 function bindUi() {
   document.querySelectorAll('.nav-item').forEach((button) => {
     button.addEventListener('click', () => setView(button.dataset.view));
-  });
-
-  document.querySelectorAll('.segment').forEach((button) => {
-    button.addEventListener('click', () => {
-      state.trafficFilter = button.dataset.filter;
-      document.querySelectorAll('.segment').forEach((item) => item.classList.toggle('active', item === button));
-      renderTraffic();
-    });
   });
 
   document.querySelectorAll('.tab').forEach((button) => {
@@ -165,6 +206,21 @@ function bindUi() {
     state.trafficSearch = el.trafficSearch.value.trim().toLowerCase();
     renderTraffic();
   });
+  [el.trafficMethodFilter, el.trafficStatusFilter, el.trafficHostFilter, el.trafficScopeFilter].forEach((container) => {
+    container.addEventListener('change', handleTrafficCheckboxFilterChange);
+  });
+  document.addEventListener('click', closeTrafficFiltersOnOutside);
+  document.addEventListener('click', closeEchoGroupListOnOutside);
+  document.addEventListener('click', closeEchoColorPickersOnOutside);
+  document.querySelectorAll('[data-sort-key]').forEach((button) => {
+    button.addEventListener('click', () => setTrafficSort(button.dataset.sortKey));
+  });
+  el.resetTrafficFiltersBtn.addEventListener('click', resetTrafficFilters);
+  el.trafficHorizontalLayoutBtn.addEventListener('click', () => setTrafficLayout({ orientation: 'horizontal' }));
+  el.trafficVerticalLayoutBtn.addEventListener('click', () => setTrafficLayout({ orientation: 'vertical' }));
+  el.showTrafficListToggle.addEventListener('change', () => setTrafficLayout({ showList: el.showTrafficListToggle.checked }));
+  el.showTrafficDetailToggle.addEventListener('change', () => setTrafficLayout({ showDetail: el.showTrafficDetailToggle.checked }));
+  el.trafficPaneResizer.addEventListener('mousedown', startTrafficPaneResize);
 
   el.siteMapSearch.addEventListener('input', () => {
     state.siteMapSearch = el.siteMapSearch.value.trim().toLowerCase();
@@ -178,20 +234,24 @@ function bindUi() {
 
   el.refreshSiteMapBtn.addEventListener('click', () => loadSiteMap());
   el.newEchoTabBtn.addEventListener('click', () => createBlankEchoTab());
-  el.closeEchoTabBtn.addEventListener('click', closeSelectedEchoTab);
+  el.newEchoGroupBtn.addEventListener('click', createEchoGroup);
   el.sendEchoBtn.addEventListener('click', sendSelectedEchoRequest);
+  el.echoTabName.addEventListener('input', syncSelectedEchoMeta);
   el.echoRawRequest.addEventListener('input', syncSelectedEchoRequest);
   el.echoRawRequest.addEventListener('scroll', syncEchoRawEditorScroll);
+  el.echoPaneResizer.addEventListener('mousedown', startEchoPaneResize);
   document.addEventListener('contextmenu', openEchoContextMenu);
   document.addEventListener('click', closeContextMenu);
   window.addEventListener('blur', closeContextMenu);
   el.sendToEchoContextBtn.addEventListener('click', () => {
-    const flowId = state.echoContextFlowId;
+    const flowId = state.contextFlowId;
     closeContextMenu();
     if (flowId) {
       sendFlowToEcho(flowId);
     }
   });
+  el.addToScopeContextBtn.addEventListener('click', () => applyScopeFromContext('include'));
+  el.removeFromScopeContextBtn.addEventListener('click', () => applyScopeFromContext('exclude'));
 
   el.requestInterceptToggle.addEventListener('change', () => {
     patchConfig({ intercept: { requests: el.requestInterceptToggle.checked } });
@@ -203,14 +263,24 @@ function bindUi() {
 
   el.saveConfigBtn.addEventListener('click', () => {
     patchConfig({
-      upstream: {
-        mode: el.upstreamMode.value,
-        host: el.upstreamHost.value.trim(),
-        port: Number(el.upstreamPort.value || 0),
-        username: el.upstreamUsername.value,
-        password: el.upstreamPassword.value,
-      },
+      upstream: { mode: 'direct', host: '', port: 0, username: '', password: '' },
+      upstreams: readUpstreamRows(),
+      upstreamRules: [],
     });
+  });
+  el.addUpstreamRuleBtn.addEventListener('click', addUpstreamRuleRow);
+  el.upstreamRulesList.addEventListener('click', (event) => {
+    const deleteButton = event.target.closest('[data-delete-upstream-rule]');
+    if (deleteButton) {
+      deleteUpstreamRuleRow(deleteButton.dataset.deleteUpstreamRule);
+    }
+  });
+  el.upstreamRulesList.addEventListener('change', (event) => {
+    const enabled = event.target.closest('[data-upstream-rule-field="enabled"]');
+    if (enabled) {
+      const label = enabled.closest('.upstream-enabled-toggle')?.querySelector('[data-enabled-label]');
+      if (label) label.textContent = enabled.checked ? 'On' : 'Off';
+    }
   });
 
   el.saveProxyBtn.addEventListener('click', saveProxyConfig);
@@ -235,6 +305,8 @@ function bindUi() {
   el.continueBtn.addEventListener('click', () => sendPendingAction('continue'));
   el.dropBtn.addEventListener('click', () => sendPendingAction('drop'));
   el.modifyBtn.addEventListener('click', () => sendPendingAction('modify'));
+  el.pendingRawBtn.addEventListener('click', () => setPendingEditorMode('raw'));
+  el.pendingPrettyBtn.addEventListener('click', () => setPendingEditorMode('pretty'));
   el.requestRulesBtn.addEventListener('click', () => openRulesModal('request'));
   el.responseRulesBtn.addEventListener('click', () => openRulesModal('response'));
   el.closeRulesBtn.addEventListener('click', closeRulesModal);
@@ -306,18 +378,19 @@ function renderAll() {
 
 function renderMeta() {
   const config = state.config || {};
-  const upstream = config.upstream || {};
+  const upstreams = configuredUpstreamRows();
   const proxyHost = config.proxyHost || '127.0.0.1';
   const proxyPort = config.proxyPort || 8080;
   el.proxyAddress.textContent = `${proxyHost}:${proxyPort}`;
-  el.trafficCount.textContent = `${state.history.length} ${state.history.length === 1 ? 'flow' : 'flows'}`;
+  const trafficCount = trafficHistory().length;
+  el.trafficCount.textContent = `${trafficCount} ${trafficCount === 1 ? 'req' : 'reqs'}`;
   el.pendingCount.textContent = `${state.pending.length} pending`;
-  el.upstreamStatus.textContent = upstream.mode === 'direct' ? 'direct' : `${upstream.mode} ${upstream.host}:${upstream.port}`;
+  el.upstreamStatus.textContent = upstreams.length === 0 ? 'direct' : `${upstreams.length} upstream${upstreams.length === 1 ? '' : 's'}`;
 }
 
 function renderConfig() {
   if (!state.config) return;
-  const { intercept, upstream } = state.config;
+  const { intercept } = state.config;
   el.requestInterceptToggle.checked = Boolean(intercept.requests);
   el.responseInterceptToggle.checked = Boolean(intercept.responses);
   if (!el.rulesModal.classList.contains('hidden')) {
@@ -325,16 +398,180 @@ function renderConfig() {
   }
   el.proxyHost.value = state.config.proxyHost;
   el.proxyPort.value = state.config.proxyPort;
-  el.upstreamMode.value = upstream.mode || 'direct';
-  el.upstreamHost.value = upstream.host || '';
-  el.upstreamPort.value = upstream.port || '';
-  el.upstreamUsername.value = upstream.username || '';
-  el.upstreamPassword.value = upstream.password || '';
+  renderUpstreamRules();
   renderScopeRules();
 }
 
+function renderUpstreamRules() {
+  const groups = configuredUpstreamRows();
+  el.upstreamRulesList.innerHTML =
+    groups
+      .map(
+        (group, index) => `
+          <div class="upstream-rule-row" data-upstream-rule-id="${escapeHtml(group.id || `upstream-${index}`)}">
+            <label class="upstream-enabled-toggle">
+              <input type="checkbox" data-upstream-rule-field="enabled" ${group.enabled !== false ? 'checked' : ''} />
+              <span class="mini-switch"></span>
+              <span data-enabled-label>${group.enabled !== false ? 'On' : 'Off'}</span>
+            </label>
+            <label class="wide">
+              <span class="label-with-info">
+                Rules
+                <span class="info-tooltip" tabindex="0" aria-label="Rules help">i
+                  <span class="tooltip-popover">
+                    Leave empty to route all traffic through this upstream.<br />
+                    domain *.example.com<br />
+                    host api.example.com:443<br />
+                    url https://*.example.com/api/*
+                  </span>
+                </span>
+              </span>
+              <textarea data-upstream-rule-field="patterns" spellcheck="false">${escapeHtml(upstreamRulesText(group.rules))}</textarea>
+            </label>
+            <label>
+              Mode
+              <select data-upstream-rule-field="mode">
+                <option value="direct" ${group.mode === 'direct' ? 'selected' : ''}>Direct</option>
+                <option value="http" ${group.mode === 'http' ? 'selected' : ''}>HTTP</option>
+                <option value="socks5" ${group.mode === 'socks5' ? 'selected' : ''}>SOCKS5</option>
+              </select>
+            </label>
+            <label>
+              Host
+              <input data-upstream-rule-field="host" type="text" value="${escapeHtml(group.host || '')}" />
+            </label>
+            <label>
+              Port
+              <input data-upstream-rule-field="port" type="number" min="0" max="65535" value="${escapeHtml(group.port || '')}" />
+            </label>
+            <label>
+              User
+              <input data-upstream-rule-field="username" type="text" value="${escapeHtml(group.username || '')}" />
+            </label>
+            <label>
+              Pass
+              <input data-upstream-rule-field="password" type="password" value="${escapeHtml(group.password || '')}" />
+            </label>
+            <button class="button ghost compact-button" type="button" data-delete-upstream-rule="${escapeHtml(group.id || `upstream-${index}`)}">Delete</button>
+          </div>
+        `,
+      )
+      .join('') || '<div class="message-empty">No upstreams configured. All traffic goes direct.</div>';
+}
+
+function addUpstreamRuleRow() {
+  const upstreams = readUpstreamRows();
+  upstreams.push({
+    id: `upstream-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    enabled: true,
+    mode: 'socks5',
+    host: '127.0.0.1',
+    port: 9050,
+    username: '',
+    password: '',
+    rules: [],
+  });
+  state.config.upstreams = upstreams;
+  state.config.upstreamRules = [];
+  renderUpstreamRules();
+}
+
+function deleteUpstreamRuleRow(id) {
+  state.config.upstreams = readUpstreamRows().filter((upstream) => upstream.id !== id);
+  state.config.upstreamRules = [];
+  renderUpstreamRules();
+}
+
+function readUpstreamRows() {
+  return [...el.upstreamRulesList.querySelectorAll('[data-upstream-rule-id]')].map((row) => ({
+    id: row.dataset.upstreamRuleId,
+    enabled: row.querySelector('[data-upstream-rule-field="enabled"]').checked,
+    mode: row.querySelector('[data-upstream-rule-field="mode"]').value,
+    host: row.querySelector('[data-upstream-rule-field="host"]').value.trim(),
+    port: Number(row.querySelector('[data-upstream-rule-field="port"]').value || 0),
+    username: row.querySelector('[data-upstream-rule-field="username"]').value,
+    password: row.querySelector('[data-upstream-rule-field="password"]').value,
+    rules: row
+      .querySelector('[data-upstream-rule-field="patterns"]')
+      .value.split(/\r?\n/)
+      .map(parseUpstreamPatternLine)
+      .filter(Boolean),
+  }));
+}
+
+function configuredUpstreamRows() {
+  if (Array.isArray(state.config?.upstreams) && state.config.upstreams.length > 0) {
+    return state.config.upstreams;
+  }
+
+  const legacyRules = state.config?.upstreamRules || [];
+  if (legacyRules.length > 0) {
+    return upstreamGroupsFromRules(legacyRules);
+  }
+
+  const legacy = state.config?.upstream || {};
+  if (legacy.mode && legacy.mode !== 'direct') {
+    return [
+      {
+        id: 'legacy-upstream',
+        enabled: true,
+        mode: legacy.mode,
+        host: legacy.host || '',
+        port: legacy.port || 0,
+        username: legacy.username || '',
+        password: legacy.password || '',
+        rules: [],
+      },
+    ];
+  }
+
+  return [];
+}
+
+function upstreamGroupsFromRules(rules) {
+  const groups = new Map();
+  for (const rule of rules) {
+    const upstream = rule.upstream || {};
+    const key = [upstream.mode, upstream.host, upstream.port, upstream.username, upstream.password, rule.enabled !== false].join('|');
+    if (!groups.has(key)) {
+      groups.set(key, {
+        id: rule.id || `upstream-${groups.size + 1}`,
+        enabled: rule.enabled !== false,
+        mode: upstream.mode || 'direct',
+        host: upstream.host || '',
+        port: upstream.port || 0,
+        username: upstream.username || '',
+        password: upstream.password || '',
+        rules: [],
+      });
+    }
+    groups.get(key).rules.push({
+      matchType: rule.matchType || 'domain',
+      pattern: rule.pattern || '',
+    });
+  }
+  return [...groups.values()];
+}
+
+function upstreamRulesText(rules = []) {
+  return rules.map((rule) => `${rule.matchType || 'domain'} ${rule.pattern || ''}`.trim()).join('\n');
+}
+
+function parseUpstreamPatternLine(line) {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+  const match = trimmed.match(/^(domain|host|url)\s+(.+)$/i);
+  return {
+    matchType: match ? match[1].toLowerCase() : 'domain',
+    pattern: match ? match[2].trim() : trimmed,
+  };
+}
+
 function renderTraffic() {
+  renderTrafficFilterControls();
+  renderTrafficLayout();
   const rows = filteredHistory();
+  el.trafficFilterCount.textContent = `${rows.length} shown`;
   el.trafficRows.innerHTML = rows
     .map((flow) => {
       const url = safeUrl(flow.url);
@@ -343,12 +580,15 @@ function renderTraffic() {
       const size = flow.type === 'connect' ? formatBytes((flow.tunnel?.bytesUp || 0) + (flow.tunnel?.bytesDown || 0)) : formatBytes(flow.responseBytes || 0);
       const duration = flow.durationMs === null || flow.durationMs === undefined ? 'open' : `${flow.durationMs}ms`;
       const echoAttr = flow.type === 'http' ? `data-echo-flow-id="${escapeHtml(flow.id)}"` : '';
+      const scopeLabel = flow.inScope ? 'in' : 'out';
       return `
         <tr data-flow-id="${escapeHtml(flow.id)}" ${echoAttr} class="${flow.id === state.selectedFlowId ? 'selected' : ''}">
+          <td class="flow-id-cell">#${escapeHtml(flow.id)}</td>
           <td><span class="method-pill">${escapeHtml(flow.method)}</span></td>
           <td title="${escapeHtml(flow.host || '')}">${escapeHtml(flow.host || '')}</td>
           <td title="${escapeHtml(path || '')}">${escapeHtml(path || '')}</td>
           <td><span class="status-pill ${flow.error ? 'error' : ''}">${escapeHtml(String(status))}</span></td>
+          <td><span class="scope-chip ${flow.inScope ? 'in-scope' : 'out-scope'}">${escapeHtml(scopeLabel)}</span></td>
           <td>${escapeHtml(size)}</td>
           <td>${escapeHtml(duration)}</td>
         </tr>
@@ -359,6 +599,192 @@ function renderTraffic() {
   el.trafficRows.querySelectorAll('tr').forEach((row) => {
     row.addEventListener('click', () => loadFlow(row.dataset.flowId));
   });
+  renderTrafficSortHeaders();
+}
+
+function renderTrafficFilterControls() {
+  const traffic = trafficHistory();
+  const methods = uniqueSorted(traffic.map((flow) => flow.method).filter(Boolean));
+  const hosts = uniqueSorted(traffic.map((flow) => flow.host).filter(Boolean));
+  state.trafficFilters.method = state.trafficFilters.method.filter((method) => methods.includes(method));
+  state.trafficFilters.host = state.trafficFilters.host.filter((host) => hosts.includes(host));
+  renderCheckboxFilter(
+    el.trafficMethodFilter,
+    'method',
+    methods.map((method) => [method, method]),
+  );
+  renderCheckboxFilter(el.trafficStatusFilter, 'status', [
+    ['2xx', '2xx'],
+    ['3xx', '3xx'],
+    ['4xx', '4xx'],
+    ['5xx', '5xx'],
+    ['error', 'Errors'],
+    ['open', 'Open'],
+  ]);
+  renderCheckboxFilter(
+    el.trafficHostFilter,
+    'host',
+    hosts.map((host) => [host, host]),
+  );
+  renderScopeFilter();
+}
+
+function renderCheckboxFilter(container, key, options) {
+  const selected = new Set(state.trafficFilters[key]);
+  const count = selected.size;
+  const label = count === 0 ? 'Any' : `${count} selected`;
+  container.innerHTML =
+    `<details class="multi-filter" data-filter-dropdown="${escapeHtml(key)}" ${state.openTrafficFilter === key ? 'open' : ''}>
+      <summary>${escapeHtml(label)}</summary>
+      <div class="multi-filter-menu">
+        ${
+          options
+            .map(
+              ([value, optionLabel]) => `
+                <label class="filter-check" title="${escapeHtml(optionLabel)}">
+                  <input type="checkbox" data-filter-key="${escapeHtml(key)}" value="${escapeHtml(value)}" ${selected.has(value) ? 'checked' : ''} />
+                  <span>${escapeHtml(optionLabel)}</span>
+                </label>
+              `,
+            )
+            .join('') || '<span class="filter-empty">-</span>'
+        }
+      </div>
+    </details>`;
+}
+
+function renderScopeFilter() {
+  el.trafficScopeFilter.innerHTML = `
+    <label class="scope-filter-check">
+      <span>In scope</span>
+      <input id="trafficInScopeOnly" type="checkbox" ${state.trafficInScopeOnly ? 'checked' : ''} />
+    </label>
+  `;
+}
+
+function uniqueSorted(values) {
+  return [...new Set(values)].sort((a, b) => String(a).localeCompare(String(b)));
+}
+
+function resetTrafficFilters() {
+  state.trafficSearch = '';
+  state.trafficFilters = {
+    method: [],
+    status: [],
+    host: [],
+  };
+  state.trafficInScopeOnly = false;
+  state.openTrafficFilter = '';
+  el.trafficSearch.value = '';
+  renderTraffic();
+}
+
+function handleTrafficCheckboxFilterChange(event) {
+  const scopeInput = event.target.closest('#trafficInScopeOnly');
+  if (scopeInput) {
+    state.trafficInScopeOnly = scopeInput.checked;
+    renderTraffic();
+    return;
+  }
+
+  const input = event.target.closest('[data-filter-key]');
+  if (!input) return;
+  const key = input.dataset.filterKey;
+  const values = new Set(state.trafficFilters[key]);
+  if (input.checked) {
+    values.add(input.value);
+  } else {
+    values.delete(input.value);
+  }
+  state.trafficFilters[key] = [...values];
+  state.openTrafficFilter = key;
+  renderTraffic();
+}
+
+function closeTrafficFiltersOnOutside(event) {
+  if (event.target.closest('.multi-filter')) return;
+  state.openTrafficFilter = '';
+  document.querySelectorAll('.multi-filter[open]').forEach((details) => {
+    details.open = false;
+  });
+}
+
+function closeEchoGroupListOnOutside(event) {
+  if (!state.selectedEchoGroupId) return;
+  if (event.target.closest('.echo-group-list, .echo-group-tab')) return;
+  state.selectedEchoGroupId = null;
+  renderEcho();
+}
+
+function closeEchoColorPickersOnOutside(event) {
+  if (!state.openEchoColorPicker) return;
+  if (event.target.closest('.echo-color-picker')) return;
+  state.openEchoColorPicker = null;
+  renderEcho();
+}
+
+function setTrafficSort(key) {
+  if (state.trafficSort.key === key) {
+    state.trafficSort.direction = state.trafficSort.direction === 'asc' ? 'desc' : 'asc';
+  } else {
+    state.trafficSort = { key, direction: 'asc' };
+  }
+  renderTraffic();
+}
+
+function renderTrafficSortHeaders() {
+  document.querySelectorAll('[data-sort-key]').forEach((button) => {
+    const active = button.dataset.sortKey === state.trafficSort.key;
+    button.classList.toggle('active', active);
+    button.dataset.sortDirection = active ? state.trafficSort.direction : '';
+  });
+}
+
+function setTrafficLayout(partial) {
+  state.trafficLayout = {
+    ...state.trafficLayout,
+    ...partial,
+  };
+  if (!state.trafficLayout.showList && !state.trafficLayout.showDetail) {
+    state.trafficLayout.showDetail = true;
+  }
+  renderTrafficLayout();
+}
+
+function renderTrafficLayout() {
+  const layout = state.trafficLayout;
+  const split = Math.max(25, Math.min(75, Number(layout.splitSize) || 58));
+  el.trafficSplit.classList.toggle('vertical', layout.orientation === 'vertical');
+  el.trafficSplit.classList.toggle('hide-list', !layout.showList);
+  el.trafficSplit.classList.toggle('hide-detail', !layout.showDetail);
+  el.trafficSplit.style.setProperty('--traffic-list-size', `${split}%`);
+  el.trafficSplit.style.setProperty('--traffic-detail-size', `${100 - split}%`);
+  el.trafficHorizontalLayoutBtn.classList.toggle('active', layout.orientation === 'horizontal');
+  el.trafficVerticalLayoutBtn.classList.toggle('active', layout.orientation === 'vertical');
+  el.showTrafficListToggle.checked = layout.showList;
+  el.showTrafficDetailToggle.checked = layout.showDetail;
+}
+
+function startTrafficPaneResize(event) {
+  event.preventDefault();
+  const bounds = el.trafficSplit.getBoundingClientRect();
+  const vertical = state.trafficLayout.orientation === 'vertical';
+
+  const onMove = (moveEvent) => {
+    const position = vertical ? moveEvent.clientY - bounds.top : moveEvent.clientX - bounds.left;
+    const total = vertical ? bounds.height : bounds.width;
+    const next = (position / total) * 100;
+    state.trafficLayout.splitSize = Math.max(25, Math.min(75, Math.round(next)));
+    renderTrafficLayout();
+  };
+
+  const onUp = () => {
+    window.removeEventListener('mousemove', onMove);
+    window.removeEventListener('mouseup', onUp);
+  };
+
+  window.addEventListener('mousemove', onMove);
+  window.addEventListener('mouseup', onUp);
 }
 
 async function loadSiteMap() {
@@ -427,27 +853,9 @@ function renderSitePaths(host) {
   const paths = filteredSitePaths(host);
   el.sitePathsTitle.textContent = host.host;
   el.sitePathsSubtitle.textContent = `${paths.length} ${paths.length === 1 ? 'path' : 'paths'} · ${host.requestCount} requests`;
-  el.sitePathsList.innerHTML =
-    paths
-      .map((path) => {
-        const latestFlowId = path.flowIds?.[0] || '';
-        const echoAttr = latestFlowId && path.path !== '(CONNECT tunnel)' ? `data-echo-flow-id="${escapeHtml(latestFlowId)}"` : '';
-        return `
-          <button class="site-path-item" type="button" data-flow-id="${escapeHtml(latestFlowId)}" ${echoAttr}>
-            <span class="site-main-line">
-              <span class="site-path-name" title="${escapeHtml(path.path)}">${escapeHtml(path.path)}</span>
-              <span class="scope-chip ${path.inScope ? 'in-scope' : 'out-scope'}">${path.inScope ? 'in scope' : 'out'}</span>
-            </span>
-            <span class="site-meta-line">
-              <span>${escapeHtml((path.methods || []).join(', ') || '-')}</span>
-              <span>${escapeHtml((path.statuses || []).join(', ') || '-')}</span>
-              <span>${escapeHtml(String(path.count))} hits</span>
-            </span>
-            ${path.query ? `<span class="site-query" title="${escapeHtml(path.query)}">${escapeHtml(path.query)}</span>` : ''}
-          </button>
-        `;
-      })
-      .join('') || '<div class="empty-state">No paths match this filter</div>';
+  el.sitePathsList.innerHTML = paths.length
+    ? `<div class="site-tree">${renderSiteTree(buildSiteTree(paths))}</div>`
+    : '<div class="empty-state">No paths match this filter</div>';
 
   el.sitePathsList.querySelectorAll('[data-flow-id]').forEach((button) => {
     button.addEventListener('click', async () => {
@@ -456,6 +864,99 @@ function renderSitePaths(host) {
       setView('traffic');
     });
   });
+}
+
+function buildSiteTree(paths) {
+  const root = createSiteTreeNode('/');
+
+  for (const path of paths) {
+    if (path.path === '(CONNECT tunnel)') {
+      root.leaves.push(path);
+      continue;
+    }
+
+    const segments = String(path.path || '/')
+      .split('/')
+      .filter(Boolean);
+    let node = root;
+    for (const segment of segments) {
+      if (!node.children.has(segment)) {
+        node.children.set(segment, createSiteTreeNode(segment));
+      }
+      node = node.children.get(segment);
+    }
+    node.leaves.push(path);
+  }
+
+  return root;
+}
+
+function createSiteTreeNode(name) {
+  return {
+    name,
+    children: new Map(),
+    leaves: [],
+  };
+}
+
+function renderSiteTree(node) {
+  const folderHtml = [...node.children.values()]
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((child) => renderSiteTreeNode(child))
+    .join('');
+  const leafHtml = node.leaves.map((path) => renderSiteTreeLeaf(path)).join('');
+  return `${folderHtml}${leafHtml}`;
+}
+
+function renderSiteTreeNode(node) {
+  const count = countSiteTreeLeaves(node);
+  return `
+    <details class="site-tree-node" open>
+      <summary>
+        <span class="site-tree-folder">▸</span>
+        <span class="site-tree-name" title="${escapeHtml(node.name)}">${escapeHtml(node.name)}</span>
+        <span class="site-tree-count">${escapeHtml(String(count))}</span>
+      </summary>
+      <div class="site-tree-children">
+        ${renderSiteTree(node)}
+      </div>
+    </details>
+  `;
+}
+
+function renderSiteTreeLeaf(path) {
+  const latestFlowId = path.flowIds?.[0] || '';
+  const echoAttr = latestFlowId && path.path !== '(CONNECT tunnel)' ? `data-echo-flow-id="${escapeHtml(latestFlowId)}"` : '';
+  const leafName = path.path === '(CONNECT tunnel)' ? path.path : siteLeafName(path.path);
+  return `
+    <button class="site-tree-leaf site-path-item" type="button" data-flow-id="${escapeHtml(latestFlowId)}" ${echoAttr}>
+      <span class="site-main-line">
+        <span class="site-path-name" title="${escapeHtml(path.path)}">${escapeHtml(leafName)}</span>
+        <span class="scope-chip ${path.inScope ? 'in-scope' : 'out-scope'}">${path.inScope ? 'in scope' : 'out'}</span>
+      </span>
+      <span class="site-meta-line">
+        <span>${escapeHtml((path.methods || []).join(', ') || '-')}</span>
+        <span>${escapeHtml((path.statuses || []).join(', ') || '-')}</span>
+        <span>${escapeHtml(String(path.count))} hits</span>
+      </span>
+      ${path.query ? `<span class="site-query" title="${escapeHtml(path.query)}">${escapeHtml(path.query)}</span>` : ''}
+    </button>
+  `;
+}
+
+function siteLeafName(path) {
+  const segments = String(path || '/')
+    .split('/')
+    .filter(Boolean);
+  return segments.at(-1) || '/';
+}
+
+function countSiteTreeLeaves(node) {
+  let count = node.leaves.length;
+  for (const child of node.children.values()) {
+    count += countSiteTreeLeaves(child);
+  }
+  return count;
 }
 
 function filteredSiteMapHosts() {
@@ -487,18 +988,11 @@ function renderEcho() {
   if (!state.echoTabs.some((tab) => tab.id === state.selectedEchoTabId)) {
     state.selectedEchoTabId = state.echoTabs[0]?.id || null;
   }
+  normalizeEchoGroups();
 
-  el.echoTabs.innerHTML =
-    state.echoTabs
-      .map(
-        (tab) => `
-          <button class="echo-tab ${tab.id === state.selectedEchoTabId ? 'active' : ''}" type="button" data-echo-tab-id="${escapeHtml(tab.id)}">
-            <span class="method-pill">${escapeHtml(tab.method || 'GET')}</span>
-            <span title="${escapeHtml(tab.title)}">${escapeHtml(tab.title)}</span>
-          </button>
-        `,
-      )
-      .join('');
+  el.echoTabs.innerHTML = renderEchoTabGroups();
+  el.echoWorkspace.style.setProperty('--echo-request-size', `${state.echoSplit}%`);
+  el.echoWorkspace.style.setProperty('--echo-response-size', `${100 - state.echoSplit}%`);
 
   el.echoTabs.querySelectorAll('[data-echo-tab-id]').forEach((button) => {
     button.addEventListener('click', () => {
@@ -506,7 +1000,45 @@ function renderEcho() {
       state.selectedEchoTabId = button.dataset.echoTabId;
       renderEcho();
     });
+    button.addEventListener('dblclick', (event) => {
+      event.preventDefault();
+      renameEchoTab(button.dataset.echoTabId);
+    });
   });
+  el.echoTabs.querySelectorAll('[data-echo-group-id]').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.selectedEchoGroupId = state.selectedEchoGroupId === button.dataset.echoGroupId ? null : button.dataset.echoGroupId;
+      renderEcho();
+    });
+    button.addEventListener('dblclick', (event) => {
+      event.preventDefault();
+      renameEchoGroup(button.dataset.echoGroupId);
+    });
+  });
+  el.echoTabs.querySelectorAll('[data-close-echo-tab]').forEach((button) => {
+    button.addEventListener('click', (event) => {
+      event.stopPropagation();
+      closeEchoTab(button.dataset.closeEchoTab);
+    });
+  });
+  el.echoTabs.querySelectorAll('[data-delete-echo-group]').forEach((button) => {
+    button.addEventListener('click', (event) => {
+      event.stopPropagation();
+      deleteEchoGroup(button.dataset.deleteEchoGroup);
+    });
+  });
+  bindEchoColorButtons(el.echoTabs);
+  el.echoTabs.querySelectorAll('[draggable="true"]').forEach((node) => {
+    node.addEventListener('dragstart', handleEchoDragStart);
+    node.addEventListener('dragover', handleEchoDragOver);
+    node.addEventListener('drop', handleEchoDrop);
+    node.addEventListener('dragend', handleEchoDragEnd);
+  });
+  el.echoTabs.querySelectorAll('[data-echo-drop-group]').forEach((node) => {
+    node.addEventListener('dragover', handleEchoDragOver);
+    node.addEventListener('drop', handleEchoDrop);
+  });
+  renderEchoGroupList();
 
   const tab = selectedEchoTab();
   if (!tab) {
@@ -518,9 +1050,131 @@ function renderEcho() {
   el.emptyEcho.classList.add('hidden');
   el.echoWorkspace.classList.remove('hidden');
   el.echoRequestSubtitle.textContent = tab.source || 'Editable request';
+  el.echoTabName.value = tab.title || '';
   el.echoRawRequest.value = tab.rawRequest || '';
   renderEchoRawRequest();
   renderEchoResponse(tab);
+}
+
+function renderEchoTabGroups() {
+  if (state.echoTabs.length === 0 && state.echoGroups.length === 0) {
+    return '';
+  }
+
+  const ungrouped = state.echoTabs.filter((tab) => !tab.groupId);
+  const groupHtml = state.echoGroups
+    .map((group) => {
+      const tabs = state.echoTabs.filter((tab) => tab.groupId === group.id);
+      const active = state.selectedEchoGroupId === group.id;
+      return `
+        <div class="echo-group-shell" data-echo-drop-group="${escapeHtml(group.id)}">
+          <button class="echo-group-tab ${echoColorClass(group.color)} ${active ? 'active' : ''}" type="button" data-echo-group-id="${escapeHtml(group.id)}">
+            ${renderEchoColorSelect('group', group.id, group.color)}
+            <span class="echo-group-title">${escapeHtml(group.title)}</span>
+            <span class="echo-group-count">${tabs.length}</span>
+            <span class="echo-group-close" role="button" tabindex="-1" aria-label="Delete group" data-delete-echo-group="${escapeHtml(group.id)}">×</span>
+          </button>
+        </div>
+      `;
+    })
+    .join('');
+
+  return `
+    <div class="echo-tab-strip" data-echo-drop-group="">
+      ${ungrouped.map((tab) => renderEchoTabButton(tab, false)).join('')}
+      <div class="echo-ungroup-drop">Drop here to ungroup</div>
+    </div>
+    ${groupHtml}
+  `;
+}
+
+function renderEchoTabButton(tab, inGroup) {
+  return `
+    <button class="echo-tab ${inGroup ? 'in-menu' : ''} ${echoColorClass(tab.color)} ${tab.id === state.selectedEchoTabId ? 'active' : ''}" type="button" draggable="true" data-echo-tab-id="${escapeHtml(tab.id)}">
+      ${renderEchoColorSelect('tab', tab.id, tab.color)}
+      <span class="method-pill">${escapeHtml(tab.method || 'GET')}</span>
+      <span class="echo-tab-title" title="${escapeHtml(tab.title)}">${escapeHtml(tab.title)}</span>
+      <span class="echo-tab-close" role="button" tabindex="-1" aria-label="Close tab" data-close-echo-tab="${escapeHtml(tab.id)}">×</span>
+    </button>
+  `;
+}
+
+function renderEchoGroupList() {
+  const group = state.echoGroups.find((item) => item.id === state.selectedEchoGroupId);
+  if (!group) {
+    el.echoGroupList.classList.add('hidden');
+    el.echoGroupList.innerHTML = '';
+    return;
+  }
+
+  const tabs = state.echoTabs.filter((tab) => tab.groupId === group.id);
+  el.echoGroupList.classList.remove('hidden');
+  el.echoGroupList.dataset.echoDropGroup = group.id;
+  el.echoGroupList.innerHTML = `
+    <div class="echo-group-list-header">
+      <span>${escapeHtml(group.title)}</span>
+      <button class="button ghost compact-button" type="button" data-rename-echo-group="${escapeHtml(group.id)}">Rename</button>
+    </div>
+    <div class="echo-group-list-tabs">
+      ${tabs.length ? tabs.map((tab) => renderEchoTabButton(tab, true)).join('') : '<div class="echo-group-empty">Drop tabs here</div>'}
+    </div>
+  `;
+  el.echoGroupList.querySelectorAll('[data-echo-tab-id]').forEach((button) => {
+    button.addEventListener('click', () => {
+      syncSelectedEchoRequest();
+      state.selectedEchoTabId = button.dataset.echoTabId;
+      renderEcho();
+    });
+    button.addEventListener('dblclick', (event) => {
+      event.preventDefault();
+      renameEchoTab(button.dataset.echoTabId);
+    });
+  });
+  el.echoGroupList.querySelectorAll('[data-close-echo-tab]').forEach((button) => {
+    button.addEventListener('click', (event) => {
+      event.stopPropagation();
+      closeEchoTab(button.dataset.closeEchoTab);
+    });
+  });
+  bindEchoColorButtons(el.echoGroupList);
+  el.echoGroupList.querySelectorAll('[draggable="true"]').forEach((node) => {
+    node.addEventListener('dragstart', handleEchoDragStart);
+    node.addEventListener('dragover', handleEchoDragOver);
+    node.addEventListener('drop', handleEchoDrop);
+    node.addEventListener('dragend', handleEchoDragEnd);
+  });
+  el.echoGroupList.ondragover = handleEchoDragOver;
+  el.echoGroupList.ondrop = handleEchoDrop;
+  el.echoGroupList.querySelector('[data-rename-echo-group]')?.addEventListener('click', (event) => {
+    renameEchoGroup(event.currentTarget.dataset.renameEchoGroup);
+  });
+}
+
+function renderEchoColorSelect(kind, id, color) {
+  const options = [
+    ['', 'None'],
+    ['cyan', 'Cyan'],
+    ['pink', 'Pink'],
+    ['amber', 'Amber'],
+    ['violet', 'Violet'],
+    ['green', 'Green'],
+    ['red', 'Red'],
+  ];
+  const pickerId = `${kind}:${id}`;
+  return `
+    <span class="echo-color-picker ${state.openEchoColorPicker === pickerId ? 'open' : ''}" title="Color">
+      <span class="echo-color-trigger ${echoColorClass(color)}" role="button" tabindex="0" data-echo-color-picker="${escapeHtml(pickerId)}"></span>
+      <span class="echo-color-menu">
+        ${options
+          .map(
+            ([value, label]) => `
+              <span class="echo-color-choice ${echoColorClass(value)} ${color === value ? 'active' : ''}" role="button" tabindex="0" title="${escapeHtml(label)}" data-echo-color-target="${escapeHtml(kind)}" data-echo-color-id="${escapeHtml(id)}" data-echo-color-value="${escapeHtml(value)}"></span>
+            `,
+          )
+          .join('')}
+      </span>
+    </span>
+  `;
 }
 
 function renderEchoResponse(tab) {
@@ -555,8 +1209,192 @@ function selectedEchoTab() {
   return state.echoTabs.find((tab) => tab.id === state.selectedEchoTabId) || null;
 }
 
+function normalizeEchoGroups() {
+  for (const tab of state.echoTabs) {
+    if (tab.group && !tab.groupId) {
+      let group = state.echoGroups.find((item) => item.title === tab.group);
+      if (!group) {
+        group = { id: `echo-group-${Date.now()}-${Math.random().toString(16).slice(2)}`, title: tab.group };
+        state.echoGroups.push(group);
+      }
+      tab.groupId = group.id;
+      delete tab.group;
+    }
+    if (tab.groupId && !state.echoGroups.some((group) => group.id === tab.groupId)) {
+      tab.groupId = '';
+    }
+  }
+}
+
+function createEchoGroup() {
+  const count = state.echoGroups.length + 1;
+  const group = {
+    id: `echo-group-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    title: `Group ${count}`,
+  };
+  state.echoGroups.push(group);
+  state.selectedEchoGroupId = group.id;
+  renderEcho();
+}
+
+function renameEchoTab(tabId) {
+  const tab = state.echoTabs.find((item) => item.id === tabId);
+  if (!tab) return;
+  const next = window.prompt('Rename Echo tab', tab.title || '');
+  if (next === null) return;
+  const trimmed = next.trim();
+  if (!trimmed) return;
+  tab.title = trimmed;
+  tab.customTitle = true;
+  renderEcho();
+}
+
+function renameEchoGroup(groupId) {
+  const group = state.echoGroups.find((item) => item.id === groupId);
+  if (!group) return;
+  const next = window.prompt('Rename Echo group', group.title || '');
+  if (next === null) return;
+  const trimmed = next.trim();
+  if (!trimmed) return;
+  group.title = trimmed;
+  renderEcho();
+}
+
+function deleteEchoGroup(groupId) {
+  state.echoGroups = state.echoGroups.filter((group) => group.id !== groupId);
+  state.echoTabs.forEach((tab) => {
+    if (tab.groupId === groupId) {
+      tab.groupId = '';
+    }
+  });
+  if (state.selectedEchoGroupId === groupId) {
+    state.selectedEchoGroupId = null;
+  }
+  renderEcho();
+}
+
+function bindEchoColorButtons(root) {
+  root.querySelectorAll('[data-echo-color-picker]').forEach((trigger) => {
+    trigger.addEventListener('click', (event) => {
+      event.stopPropagation();
+      state.openEchoColorPicker = state.openEchoColorPicker === trigger.dataset.echoColorPicker ? null : trigger.dataset.echoColorPicker;
+      renderEcho();
+    });
+    trigger.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      event.stopPropagation();
+      state.openEchoColorPicker = state.openEchoColorPicker === trigger.dataset.echoColorPicker ? null : trigger.dataset.echoColorPicker;
+      renderEcho();
+    });
+  });
+  root.querySelectorAll('[data-echo-color-target]').forEach((button) => {
+    button.addEventListener('click', (event) => {
+      event.stopPropagation();
+      state.openEchoColorPicker = null;
+      setEchoColor(button.dataset.echoColorTarget, button.dataset.echoColorId, button.dataset.echoColorValue || '');
+    });
+    button.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      event.stopPropagation();
+      state.openEchoColorPicker = null;
+      setEchoColor(button.dataset.echoColorTarget, button.dataset.echoColorId, button.dataset.echoColorValue || '');
+    });
+  });
+}
+
+function setEchoColor(kind, id, color) {
+  const item =
+    kind === 'group'
+      ? state.echoGroups.find((group) => group.id === id)
+      : state.echoTabs.find((tab) => tab.id === id);
+  if (!item) return;
+  item.color = color || '';
+  renderEcho();
+}
+
+function echoColorClass(color) {
+  const normalized = String(color || '').replace(/[^a-z0-9_-]/gi, '');
+  return normalized ? `echo-color-${normalized}` : '';
+}
+
+function handleEchoDragStart(event) {
+  const tabId = event.currentTarget.dataset.echoTabId;
+  event.dataTransfer.setData('text/plain', tabId);
+  event.dataTransfer.effectAllowed = 'move';
+  event.currentTarget.classList.add('dragging');
+  el.echoTabs.classList.add('drag-active');
+}
+
+function handleEchoDragOver(event) {
+  event.preventDefault();
+  event.dataTransfer.dropEffect = 'move';
+}
+
+function handleEchoDrop(event) {
+  event.preventDefault();
+  const tabId = event.dataTransfer.getData('text/plain');
+  if (!tabId) return;
+
+  const targetTabId = event.currentTarget.dataset.echoTabId || '';
+  const targetGroupId = event.currentTarget.dataset.echoDropGroup ?? event.currentTarget.closest('[data-echo-drop-group]')?.dataset.echoDropGroup ?? '';
+  moveEchoTab(tabId, targetTabId, targetGroupId);
+}
+
+function handleEchoDragEnd(event) {
+  event.currentTarget.classList.remove('dragging');
+  el.echoTabs.classList.remove('drag-active');
+}
+
+function moveEchoTab(tabId, targetTabId, targetGroupId) {
+  const tab = state.echoTabs.find((item) => item.id === tabId);
+  if (!tab) return;
+
+  state.echoTabs = state.echoTabs.filter((item) => item.id !== tabId);
+  tab.groupId = targetGroupId || '';
+
+  let insertIndex = state.echoTabs.length;
+  if (targetTabId && targetTabId !== tabId) {
+    const targetIndex = state.echoTabs.findIndex((item) => item.id === targetTabId);
+    if (targetIndex !== -1) {
+      insertIndex = targetIndex;
+      tab.groupId = state.echoTabs[targetIndex].groupId || targetGroupId || '';
+    }
+  } else if (targetGroupId) {
+    const groupIndexes = state.echoTabs
+      .map((item, index) => (item.groupId === targetGroupId ? index : -1))
+      .filter((index) => index !== -1);
+    insertIndex = groupIndexes.length ? groupIndexes.at(-1) + 1 : state.echoTabs.length;
+  }
+
+  state.echoTabs.splice(insertIndex, 0, tab);
+  state.selectedEchoGroupId = tab.groupId || null;
+  renderEcho();
+}
+
+function startEchoPaneResize(event) {
+  event.preventDefault();
+  const bounds = el.echoWorkspace.getBoundingClientRect();
+
+  const onMove = (moveEvent) => {
+    const next = ((moveEvent.clientX - bounds.left) / bounds.width) * 100;
+    state.echoSplit = Math.max(25, Math.min(75, Math.round(next)));
+    el.echoWorkspace.style.setProperty('--echo-request-size', `${state.echoSplit}%`);
+    el.echoWorkspace.style.setProperty('--echo-response-size', `${100 - state.echoSplit}%`);
+  };
+
+  const onUp = () => {
+    window.removeEventListener('mousemove', onMove);
+    window.removeEventListener('mouseup', onUp);
+  };
+
+  window.addEventListener('mousemove', onMove);
+  window.addEventListener('mouseup', onUp);
+}
+
 function renderEchoRawRequest() {
-  el.echoRawRequestHighlight.innerHTML = `${highlightHttpMessage(el.echoRawRequest.value)}\n`;
+  el.echoRawRequestHighlight.innerHTML = renderLineNumberedHighlighted(highlightHttpMessage(el.echoRawRequest.value));
   syncEchoRawEditorScroll();
 }
 
@@ -598,6 +1436,8 @@ function createEchoTab(request, title, source = 'Editable request') {
   return {
     id: `echo-${Date.now()}-${Math.random().toString(16).slice(2)}`,
     title: displayTitle,
+    customTitle: false,
+    groupId: '',
     source,
     method: parsedRaw.method || request.method || 'GET',
     rawRequest,
@@ -617,14 +1457,30 @@ function syncSelectedEchoRequest() {
   tab.rawRequest = el.echoRawRequest.value;
   const parsed = parseRawRequestMeta(tab.rawRequest);
   tab.method = parsed.method || 'GET';
-  tab.title = `${tab.method} ${parsed.target || '/'}`;
+  if (!tab.customTitle) {
+    tab.title = `${tab.method} ${parsed.target || '/'}`;
+    el.echoTabName.value = tab.title;
+  }
   renderEchoRawRequest();
 }
 
-function closeSelectedEchoTab() {
-  const selectedId = state.selectedEchoTabId;
-  state.echoTabs = state.echoTabs.filter((tab) => tab.id !== selectedId);
-  state.selectedEchoTabId = state.echoTabs[0]?.id || null;
+function syncSelectedEchoMeta() {
+  const tab = selectedEchoTab();
+  if (!tab || el.echoWorkspace.classList.contains('hidden')) {
+    return;
+  }
+
+  const nextTitle = el.echoTabName.value.trim();
+  tab.title = nextTitle || `${tab.method || 'GET'} ${parseRawRequestMeta(tab.rawRequest).target || '/'}`;
+  tab.customTitle = Boolean(nextTitle);
+  renderEcho();
+}
+
+function closeEchoTab(tabId) {
+  state.echoTabs = state.echoTabs.filter((tab) => tab.id !== tabId);
+  if (state.selectedEchoTabId === tabId) {
+    state.selectedEchoTabId = state.echoTabs[0]?.id || null;
+  }
   renderEcho();
 }
 
@@ -663,32 +1519,134 @@ async function sendSelectedEchoRequest() {
 }
 
 function openEchoContextMenu(event) {
-  const source = event.target.closest('[data-echo-flow-id]');
-  if (!source || !source.dataset.echoFlowId) {
+  const source = event.target.closest('[data-flow-id], [data-echo-flow-id]');
+  const flowId = source?.dataset.flowId || source?.dataset.echoFlowId || '';
+  if (!flowId) {
     closeContextMenu();
     return;
   }
 
   event.preventDefault();
-  state.echoContextFlowId = source.dataset.echoFlowId;
-  el.contextMenu.style.left = `${Math.min(event.clientX, window.innerWidth - 180)}px`;
-  el.contextMenu.style.top = `${Math.min(event.clientY, window.innerHeight - 46)}px`;
+  const flow = flowSummaryById(flowId);
+  state.contextFlowId = flowId;
+  state.echoContextFlowId = source.dataset.echoFlowId || (flow?.type === 'http' ? flowId : null);
+  el.sendToEchoContextBtn.disabled = flow?.type !== 'http';
+  const inConfiguredScope = Boolean(state.config?.scope?.enabled && flow?.inScope);
+  el.addToScopeContextBtn.classList.toggle('hidden', inConfiguredScope);
+  el.removeFromScopeContextBtn.classList.toggle('hidden', !inConfiguredScope);
+  el.contextMenu.style.left = `${Math.min(event.clientX, window.innerWidth - 210)}px`;
+  el.contextMenu.style.top = `${Math.min(event.clientY, window.innerHeight - 86)}px`;
   el.contextMenu.classList.remove('hidden');
 }
 
 function closeContextMenu() {
+  state.contextFlowId = null;
   state.echoContextFlowId = null;
   el.contextMenu.classList.add('hidden');
 }
 
+function flowSummaryById(flowId) {
+  if (state.selectedFlow?.id === flowId) {
+    return state.selectedFlow;
+  }
+  return state.history.find((flow) => flow.id === flowId) || null;
+}
+
+async function applyScopeFromContext(action) {
+  const flowId = state.contextFlowId;
+  closeContextMenu();
+  if (!flowId) {
+    return;
+  }
+
+  const flow = flowSummaryById(flowId) || (await api(`/api/history/${encodeURIComponent(flowId)}`));
+  const scopeUrl = scopeUrlWithoutQuery(flow);
+  if (!scopeUrl) {
+    return;
+  }
+
+  const scope = state.config?.scope || { enabled: false, rules: [] };
+  const rules = (scope.rules || []).filter(
+    (rule) => !(rule.field === 'url' && rule.operator === 'equals' && rule.value === scopeUrl),
+  );
+  rules.push({
+    id: `scope-context-${Date.now()}`,
+    enabled: true,
+    action,
+    field: 'url',
+    operator: 'equals',
+    value: scopeUrl,
+  });
+
+  await patchConfig({
+    scope: {
+      ...scope,
+      enabled: true,
+      rules,
+    },
+  });
+}
+
+function scopeUrlWithoutQuery(flow) {
+  const parsed = safeUrl(flow?.request?.url || flow?.url || '');
+  if (!parsed) {
+    return '';
+  }
+  return `${parsed.origin}${parsed.pathname || '/'}`;
+}
+
 function filteredHistory() {
-  return state.history.filter((flow) => {
-    if (state.trafficFilter === 'http' && flow.type !== 'http') return false;
-    if (state.trafficFilter === 'connect' && flow.type !== 'connect') return false;
-    if (state.trafficFilter === 'error' && !flow.error) return false;
+  return trafficHistory().filter((flow) => {
+    if (state.trafficFilters.method.length > 0 && !state.trafficFilters.method.includes(flow.method)) return false;
+    if (state.trafficFilters.host.length > 0 && !state.trafficFilters.host.includes(flow.host)) return false;
+    if (state.trafficInScopeOnly && !flow.inScope) return false;
+    if (!matchesStatusFilters(flow)) return false;
     if (!state.trafficSearch) return true;
-    const haystack = `${flow.method} ${flow.host} ${flow.url} ${flow.statusCode || ''}`.toLowerCase();
+    const haystack = `${flow.id} ${flow.method} ${flow.host} ${flow.url} ${flow.statusCode || ''} ${flow.inScope ? 'in scope' : 'out scope'}`.toLowerCase();
     return haystack.includes(state.trafficSearch);
+  }).sort(compareTrafficFlows);
+}
+
+function trafficHistory() {
+  return state.history.filter(isTrafficFlow);
+}
+
+function isTrafficFlow(flow) {
+  return flow && flow.type !== 'connect' && flow.method !== 'CONNECT';
+}
+
+function compareTrafficFlows(a, b) {
+  const direction = state.trafficSort.direction === 'asc' ? 1 : -1;
+  const key = state.trafficSort.key;
+  const av = trafficSortValue(a, key);
+  const bv = trafficSortValue(b, key);
+  if (typeof av === 'number' && typeof bv === 'number') {
+    return (av - bv) * direction;
+  }
+  return String(av).localeCompare(String(bv)) * direction;
+}
+
+function trafficSortValue(flow, key) {
+  if (key === 'id') return Number(flow.id) || 0;
+  if (key === 'method') return flow.method || '';
+  if (key === 'host') return flow.host || '';
+  if (key === 'path') return safeUrl(flow.url)?.pathname || flow.path || flow.url || '';
+  if (key === 'status') return Number(flow.statusCode) || (flow.error ? 999 : 0);
+  if (key === 'scope') return flow.inScope ? 1 : 0;
+  if (key === 'size') return Number(flow.responseBytes || 0);
+  if (key === 'time') return Number(flow.durationMs ?? Number.MAX_SAFE_INTEGER);
+  return '';
+}
+
+function matchesStatusFilters(flow) {
+  const filters = state.trafficFilters.status;
+  if (filters.length === 0) return true;
+  return filters.some((filter) => {
+    if (filter === 'error') return Boolean(flow.error);
+    if (filter === 'open') return flow.durationMs === null || flow.durationMs === undefined;
+    if (!/^[2-5]xx$/.test(filter)) return true;
+    const status = Number(flow.statusCode);
+    return status >= Number(filter[0]) * 100 && status < (Number(filter[0]) + 1) * 100;
   });
 }
 
@@ -703,6 +1661,7 @@ function renderDetail() {
   if (!state.selectedFlow) {
     el.emptyDetail.classList.remove('hidden');
     el.flowDetail.classList.add('hidden');
+    delete el.flowDetail.dataset.flowId;
     delete el.flowDetail.dataset.echoFlowId;
     return;
   }
@@ -710,6 +1669,7 @@ function renderDetail() {
   const flow = state.selectedFlow;
   el.emptyDetail.classList.add('hidden');
   el.flowDetail.classList.remove('hidden');
+  el.flowDetail.dataset.flowId = flow.id;
   if (flow.type === 'http') {
     el.flowDetail.dataset.echoFlowId = flow.id;
   } else {
@@ -890,7 +1850,7 @@ function buildRawMessage(startLine, headers, body) {
 function setHighlightedHttp(target, raw) {
   const text = String(raw || '');
   target.dataset.rawText = text;
-  target.innerHTML = highlightHttpMessage(text);
+  target.innerHTML = renderLineNumberedHighlighted(highlightHttpMessage(text));
 }
 
 function parseRawRequestMeta(raw) {
@@ -992,16 +1952,31 @@ function renderBody(container, message, context) {
   const pre = document.createElement('pre');
   if (isText) {
     const formatted = formatBodyForContentType(message.bodyText || '', contentType);
-    pre.className = `syntax-block language-${formatted.language}`;
+    pre.className = `syntax-block line-numbered language-${formatted.language}`;
     pre.dataset.rawText = formatted.text;
-    pre.innerHTML = highlightStructuredText(formatted.text, formatted.language);
+    pre.innerHTML = renderLineNumberedHighlighted(highlightStructuredText(formatted.text, formatted.language));
   } else {
     const binaryText = `Binary body: ${contentType}, ${formatBytes(byteLength)}\n\n${message.bodyBase64 || ''}`;
-    pre.className = 'syntax-block language-plain';
+    pre.className = 'syntax-block line-numbered language-plain';
     pre.dataset.rawText = binaryText;
-    pre.textContent = binaryText;
+    pre.innerHTML = renderLineNumberedHighlighted(escapeHtml(binaryText));
   }
   container.appendChild(pre);
+}
+
+function formatBodyText(text, headers = {}) {
+  if (!text) {
+    return '<div class="message-empty">No body.</div>';
+  }
+  const contentType = headerValue(headers, 'content-type') || 'text/plain';
+  const formatted = formatBodyForContentType(text, contentType);
+  return `<pre class="syntax-block line-numbered language-${escapeHtml(formatted.language)}">${renderLineNumberedHighlighted(highlightStructuredText(formatted.text, formatted.language))}</pre>`;
+}
+
+function renderLineNumberedHighlighted(highlightedHtml) {
+  const html = String(highlightedHtml || '');
+  const lines = html.split('\n');
+  return lines.map((line) => `<span class="code-line">${line || ' '}</span>`).join('');
 }
 
 function formatBodyForContentType(text, contentType = '') {
@@ -1356,6 +2331,46 @@ function renderPendingEditor() {
 
   el.editHeaders.value = headersToText(item.editable.headers);
   el.editBody.value = item.editable.bodyText || '';
+  renderPendingPretty(item);
+  renderPendingEditorMode();
+}
+
+function setPendingEditorMode(mode) {
+  state.pendingEditorMode = mode === 'pretty' ? 'pretty' : 'raw';
+  renderPendingEditorMode();
+}
+
+function renderPendingEditorMode() {
+  const pretty = state.pendingEditorMode === 'pretty';
+  el.pendingPrettyBtn.classList.toggle('active', pretty);
+  el.pendingRawBtn.classList.toggle('active', !pretty);
+  el.pendingPrettyView.classList.toggle('hidden', !pretty);
+  el.pendingRawView.classList.toggle('hidden', pretty);
+}
+
+function renderPendingPretty(item) {
+  const editable = item.editable || {};
+  const isRequest = item.stage === 'request';
+  const url = isRequest ? safeUrl(editable.url) : safeUrl(item.summary?.url);
+  const summary = isRequest
+    ? [
+        ['Method', editable.method || '-'],
+        ['Host', url?.host || headerValue(editable.headers, 'host') || '-'],
+        ['Path', url ? `${url.pathname}${url.search}` : editable.url || '-'],
+        ['Body', formatBytes(Buffer.byteLength(editable.bodyText || ''))],
+      ]
+    : [
+        ['Status', `${editable.statusCode || '-'} ${editable.statusMessage || ''}`.trim()],
+        ['URL', item.summary?.url || '-'],
+        ['Body', formatBytes(Buffer.byteLength(editable.bodyText || ''))],
+      ];
+
+  el.pendingPrettyView.innerHTML = `
+    <div class="message-summary">${summaryCards(summary)}</div>
+    ${isRequest ? `<section class="message-section"><h3>Query Parameters</h3>${renderQueryTable(url)}</section>` : ''}
+    <section class="message-section"><h3>Headers</h3>${renderHeaderTable(editable.headers)}</section>
+    <section class="message-section"><h3>Body</h3><div class="body-block">${formatBodyText(editable.bodyText || '', editable.headers)}</div></section>
+  `;
 }
 
 function renderRules() {

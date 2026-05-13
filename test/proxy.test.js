@@ -1,7 +1,13 @@
 const assert = require('node:assert/strict');
 const http = require('node:http');
+const https = require('node:https');
 const net = require('node:net');
+const tls = require('node:tls');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const test = require('node:test');
+const { execFileSync } = require('node:child_process');
 const { createApp } = require('../src/main/veilApp');
 
 const socketReadBuffers = new WeakMap();
@@ -328,6 +334,117 @@ test('sends Echo requests through configured SOCKS5 upstream proxy', async () =>
   }
 });
 
+test('routes matching requests through per-target upstream rules', async () => {
+  const directOrigin = await createOriginServer();
+  const routedOrigin = await createOriginServer();
+  const socks = await createSocks5Server({ requireIpAddressTypeForIpTargets: true });
+  const app = createApp({
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+      upstream: { mode: 'direct', host: '', port: 0, username: '', password: '' },
+      upstreamRules: [
+        {
+          id: 'route-routed-origin',
+          enabled: true,
+          matchType: 'host',
+          pattern: `127.0.0.1:${routedOrigin.port}`,
+          upstream: { mode: 'socks5', host: '127.0.0.1', port: socks.port, username: '', password: '' },
+        },
+      ],
+    },
+  });
+
+  await app.start();
+
+  try {
+    const directResponse = await proxyRequest(app.proxy.port, {
+      method: 'GET',
+      path: `http://127.0.0.1:${directOrigin.port}/direct`,
+      headers: { host: `127.0.0.1:${directOrigin.port}` },
+    });
+    assert.equal(directResponse.statusCode, 200);
+    assert.equal(socks.requests.length, 0);
+
+    const routedResponse = await proxyRequest(app.proxy.port, {
+      method: 'GET',
+      path: `http://127.0.0.1:${routedOrigin.port}/routed`,
+      headers: { host: `127.0.0.1:${routedOrigin.port}` },
+    });
+    assert.equal(routedResponse.statusCode, 200);
+    assert.equal(socks.requests.length, 1);
+    assert.equal(socks.requests[0].host, '127.0.0.1');
+    assert.equal(socks.requests[0].port, routedOrigin.port);
+  } finally {
+    await app.stop();
+    await directOrigin.close();
+    await routedOrigin.close();
+    await socks.close();
+  }
+});
+
+test('configured upstreams route all traffic without rules and use direct when no rule matches', async () => {
+  const origin = await createOriginServer();
+  const socks = await createSocks5Server({ requireIpAddressTypeForIpTargets: true });
+  const app = createApp({
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+      upstreams: [
+        {
+          id: 'all-through-socks',
+          enabled: true,
+          mode: 'socks5',
+          host: '127.0.0.1',
+          port: socks.port,
+          username: '',
+          password: '',
+          rules: [],
+        },
+      ],
+    },
+  });
+
+  await app.start();
+
+  try {
+    const firstResponse = await proxyRequest(app.proxy.port, {
+      method: 'GET',
+      path: `http://127.0.0.1:${origin.port}/all`,
+      headers: { host: `127.0.0.1:${origin.port}` },
+    });
+    assert.equal(firstResponse.statusCode, 200);
+    assert.equal(socks.requests.length, 1);
+
+    await app.proxy.updateConfig({
+      upstreams: [
+        {
+          id: 'only-example',
+          enabled: true,
+          mode: 'socks5',
+          host: '127.0.0.1',
+          port: socks.port,
+          username: '',
+          password: '',
+          rules: [{ matchType: 'domain', pattern: 'example.invalid' }],
+        },
+      ],
+    });
+
+    const secondResponse = await proxyRequest(app.proxy.port, {
+      method: 'GET',
+      path: `http://127.0.0.1:${origin.port}/direct`,
+      headers: { host: `127.0.0.1:${origin.port}` },
+    });
+    assert.equal(secondResponse.statusCode, 200);
+    assert.equal(socks.requests.length, 1);
+  } finally {
+    await app.stop();
+    await origin.close();
+    await socks.close();
+  }
+});
+
 test('tunnels CONNECT requests through a strict SOCKS5 upstream proxy', async () => {
   const origin = await createOriginServer();
   const socks = await createSocks5Server({ requireIpAddressTypeForIpTargets: true });
@@ -353,6 +470,49 @@ test('tunnels CONNECT requests through a strict SOCKS5 upstream proxy', async ()
   } finally {
     await app.stop();
     await socks.close();
+    await origin.close();
+  }
+});
+
+test('intercepts and inspects HTTPS requests inside CONNECT tunnels', async () => {
+  const origin = await createHttpsOriginServer();
+  const certDir = fs.mkdtempSync(path.join(os.tmpdir(), 'veil-proxy-test-ca-'));
+  const app = createApp({
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+      https: {
+        intercept: true,
+        interceptPorts: [origin.port],
+        certDir,
+        ignoreUpstreamCertificateErrors: true,
+      },
+    },
+  });
+
+  await app.start();
+
+  try {
+    const response = await tunnelHttpsRequest(app.proxy.port, `127.0.0.1:${origin.port}`, '/secure?x=1', {
+      ca: fs.readFileSync(app.proxy.certAuthority.caCertPath),
+    });
+
+    assert.match(response, /^HTTP\/1\.1 200 OK/);
+    const body = response.slice(response.indexOf('\r\n\r\n') + 4);
+    assert.deepEqual(JSON.parse(body), {
+      method: 'GET',
+      url: '/secure?x=1',
+      body: '',
+    });
+
+    const flow = await waitFor(() =>
+      app.proxy.listHistory().find((item) => item.type === 'http' && item.url === `https://127.0.0.1:${origin.port}/secure?x=1`),
+    );
+    assert.equal(flow.method, 'GET');
+    assert.equal(flow.statusCode, 200);
+    assert.equal(flow.host, `127.0.0.1:${origin.port}`);
+  } finally {
+    await app.stop();
     await origin.close();
   }
 });
@@ -406,9 +566,9 @@ test('builds site map entries and applies scope rules', async () => {
             id: 'include-in-scope',
             enabled: true,
             action: 'include',
-            field: 'path',
-            operator: 'startsWith',
-            value: '/in-scope',
+            field: 'url',
+            operator: 'equals',
+            value: `http://127.0.0.1:${origin.port}/in-scope/item`,
           },
         ],
       },
@@ -469,6 +629,59 @@ async function createOriginServer() {
   return {
     port: server.address().port,
     close: () => close(server),
+  };
+}
+
+async function createHttpsOriginServer() {
+  const credentials = createSelfSignedCredentials();
+  const server = https.createServer(credentials, (req, res) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => {
+      res.writeHead(200, {
+        'content-type': 'application/json',
+      });
+      res.end(
+        JSON.stringify({
+          method: req.method,
+          url: req.url,
+          body: Buffer.concat(chunks).toString('utf8'),
+        }),
+      );
+    });
+  });
+
+  await listen(server, 0);
+  return {
+    port: server.address().port,
+    close: () => close(server),
+  };
+}
+
+function createSelfSignedCredentials() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'veil-proxy-test-origin-'));
+  const keyPath = path.join(dir, 'origin.key');
+  const certPath = path.join(dir, 'origin.crt');
+  execFileSync('openssl', [
+    'req',
+    '-x509',
+    '-newkey',
+    'rsa:2048',
+    '-nodes',
+    '-keyout',
+    keyPath,
+    '-out',
+    certPath,
+    '-days',
+    '2',
+    '-subj',
+    '/CN=127.0.0.1',
+    '-addext',
+    'subjectAltName=IP:127.0.0.1',
+  ], { stdio: 'pipe' });
+  return {
+    key: fs.readFileSync(keyPath),
+    cert: fs.readFileSync(certPath),
   };
 }
 
@@ -587,6 +800,31 @@ async function tunnelHttpRequest(proxyPort, authority, path) {
 
   socket.write(`GET ${path} HTTP/1.1\r\nHost: ${authority}\r\nConnection: close\r\n\r\n`);
   const body = await readAll(socket, rest);
+  return body.toString('utf8');
+}
+
+async function tunnelHttpsRequest(proxyPort, authority, requestPath, options = {}) {
+  const socket = net.connect({ host: '127.0.0.1', port: proxyPort });
+  await once(socket, 'connect');
+  socket.write(`CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\n\r\n`);
+
+  const { head, rest } = await readUntil(socket, '\r\n\r\n');
+  const statusLine = head.toString('latin1').split('\r\n')[0];
+  assert.match(statusLine, /^HTTP\/1\.1 200 /);
+  if (rest.length > 0) {
+    socketReadBuffers.set(socket, rest);
+  }
+
+  const tlsSocket = tls.connect({
+    socket,
+    ca: options.ca,
+    rejectUnauthorized: true,
+    checkServerIdentity: () => undefined,
+  });
+  await once(tlsSocket, 'secureConnect');
+
+  tlsSocket.write(`GET ${requestPath} HTTP/1.1\r\nHost: ${authority}\r\nConnection: close\r\n\r\n`);
+  const body = await readAll(tlsSocket);
   return body.toString('utf8');
 }
 

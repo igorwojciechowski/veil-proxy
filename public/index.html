@@ -31,7 +31,7 @@
             <span>Scope</span>
           </button>
           <button class="nav-item" type="button" data-view="echo" title="Echo">
-            <span class="nav-icon">↬</span>
+            <span class="nav-icon">↻</span>
             <span>Echo</span>
           </button>
           <button class="nav-item" type="button" data-view="intercept" title="Intercept">
@@ -55,7 +55,7 @@
           <div>
             <h1 id="viewTitle">Traffic</h1>
             <div class="meta-row">
-              <span id="trafficCount">0 flows</span>
+              <span id="trafficCount">0 reqs</span>
               <span id="pendingCount">0 pending</span>
               <span id="upstreamStatus">direct</span>
             </div>
@@ -81,33 +81,66 @@
         </header>
 
         <section id="trafficView" class="view active">
-          <div class="split-grid">
+          <div class="traffic-view-stack">
+          <div class="layout-toolbar">
+            <div class="segmented compact-segmented">
+              <button id="trafficHorizontalLayoutBtn" class="segment active" type="button">Horizontal</button>
+              <button id="trafficVerticalLayoutBtn" class="segment" type="button">Vertical</button>
+            </div>
+            <label class="inline-check">
+              <input id="showTrafficListToggle" type="checkbox" checked />
+              <span>List</span>
+            </label>
+            <label class="inline-check">
+              <input id="showTrafficDetailToggle" type="checkbox" checked />
+              <span>Detail</span>
+            </label>
+          </div>
+          <div class="split-grid traffic-split" id="trafficSplit">
             <section class="panel traffic-panel">
-              <div class="panel-toolbar">
-                <div class="segmented">
-                  <button class="segment active" type="button" data-filter="all">All</button>
-                  <button class="segment" type="button" data-filter="http">HTTP</button>
-                  <button class="segment" type="button" data-filter="connect">CONNECT</button>
-                  <button class="segment" type="button" data-filter="error">Errors</button>
+              <div class="traffic-filter-bar">
+                <label class="traffic-search-label">
+                  Search
+                  <input id="trafficSearch" class="search-input" type="search" placeholder="ID, host, path, method, status" />
+                </label>
+                <div class="traffic-filter-group">
+                  Method
+                  <div id="trafficMethodFilter" class="checkbox-filter-list"></div>
                 </div>
-                <input id="trafficSearch" class="search-input" type="search" placeholder="Filter host, path, method" />
+                <div class="traffic-filter-group">
+                  Status
+                  <div id="trafficStatusFilter" class="checkbox-filter-list"></div>
+                </div>
+                <div class="traffic-filter-group traffic-host-filter">
+                  Host
+                  <div id="trafficHostFilter" class="checkbox-filter-list"></div>
+                </div>
+                <div class="traffic-filter-group traffic-scope-filter">
+                  <div id="trafficScopeFilter" class="checkbox-filter-list"></div>
+                </div>
+                <button id="resetTrafficFiltersBtn" class="button ghost compact-button" type="button">Reset</button>
+                <span id="trafficFilterCount" class="filter-count">0 shown</span>
               </div>
               <div class="table-wrap">
                 <table class="traffic-table">
                   <thead>
                     <tr>
-                      <th>Method</th>
-                      <th>Host</th>
-                      <th>Path</th>
-                      <th>Status</th>
-                      <th>Size</th>
-                      <th>Time</th>
+                      <th><button class="table-sort" type="button" data-sort-key="id">ID</button></th>
+                      <th><button class="table-sort" type="button" data-sort-key="method">Method</button></th>
+                      <th><button class="table-sort" type="button" data-sort-key="host">Host</button></th>
+                      <th><button class="table-sort" type="button" data-sort-key="path">Path</button></th>
+                      <th><button class="table-sort" type="button" data-sort-key="status">Status</button></th>
+                      <th><button class="table-sort" type="button" data-sort-key="scope">Scope</button></th>
+                      <th><button class="table-sort" type="button" data-sort-key="size">Size</button></th>
+                      <th><button class="table-sort" type="button" data-sort-key="time">Time</button></th>
                     </tr>
                   </thead>
                   <tbody id="trafficRows"></tbody>
                 </table>
               </div>
             </section>
+
+            <div id="trafficPaneResizer" class="traffic-pane-resizer" role="separator" aria-label="Resize traffic panels"></div>
 
             <section class="panel detail-panel">
               <div id="emptyDetail" class="empty-state">Select a flow</div>
@@ -151,7 +184,7 @@
                       <span>Raw request</span>
                       <button class="button ghost copy-button" type="button" data-copy-target="requestRawText">Copy</button>
                     </div>
-                    <pre id="requestRawText" class="raw-code http-code" tabindex="0"></pre>
+                    <pre id="requestRawText" class="raw-code http-code line-numbered" tabindex="0"></pre>
                   </div>
                 </div>
                 <div id="responseTab" class="tab-page">
@@ -175,7 +208,7 @@
                       <span>Raw response</span>
                       <button class="button ghost copy-button" type="button" data-copy-target="responseRawText">Copy</button>
                     </div>
-                    <pre id="responseRawText" class="raw-code http-code" tabindex="0"></pre>
+                    <pre id="responseRawText" class="raw-code http-code line-numbered" tabindex="0"></pre>
                   </div>
                 </div>
                 <div id="metaTab" class="tab-page">
@@ -183,6 +216,7 @@
                 </div>
               </div>
             </section>
+          </div>
           </div>
         </section>
 
@@ -221,8 +255,10 @@
             <section class="panel echo-panel">
               <div class="echo-tabs-bar">
                 <div id="echoTabs" class="echo-tabs"></div>
+                <button id="newEchoGroupBtn" class="button ghost compact-button" type="button">+ Group</button>
                 <button id="newEchoTabBtn" class="button ghost compact-button" type="button">+ Tab</button>
               </div>
+              <div id="echoGroupList" class="echo-group-list hidden"></div>
 
               <div id="emptyEcho" class="empty-state">Send a request to Echo</div>
               <div id="echoWorkspace" class="echo-workspace hidden">
@@ -233,22 +269,29 @@
                       <div id="echoRequestSubtitle" class="panel-subtitle">Editable request</div>
                     </div>
                     <div class="button-row">
-                      <button id="closeEchoTabBtn" class="button ghost compact-button" type="button">Close tab</button>
                       <button id="sendEchoBtn" class="button primary" type="button">Send</button>
                     </div>
                   </div>
 
                   <div class="echo-raw-editor">
+                    <div class="echo-tab-meta">
+                      <label>
+                        Name
+                        <input id="echoTabName" type="text" autocomplete="off" />
+                      </label>
+                    </div>
                     <div class="raw-toolbar">
                       <span>Raw request</span>
                       <button class="button ghost copy-button" type="button" data-copy-target="echoRawRequest">Copy</button>
                     </div>
                     <div class="raw-editor-wrap">
-                      <pre id="echoRawRequestHighlight" class="raw-code http-code raw-editor-highlight" aria-hidden="true"></pre>
-                      <textarea id="echoRawRequest" class="raw-editor-input" spellcheck="false" autocomplete="off"></textarea>
+                      <pre id="echoRawRequestHighlight" class="raw-code http-code raw-editor-highlight line-numbered" aria-hidden="true"></pre>
+                      <textarea id="echoRawRequest" class="raw-editor-input" spellcheck="false" autocomplete="off" wrap="soft"></textarea>
                     </div>
                   </div>
                 </section>
+
+                <div id="echoPaneResizer" class="echo-pane-resizer" role="separator" aria-label="Resize Echo panes"></div>
 
                 <section class="echo-response-pane">
                   <div class="panel-title-row">
@@ -263,7 +306,7 @@
                       <span>Raw response</span>
                       <button class="button ghost copy-button" type="button" data-copy-target="echoRawResponse">Copy</button>
                     </div>
-                    <pre id="echoRawResponse" class="raw-code http-code echo-raw-response" tabindex="0">Send the request to see a response.</pre>
+                    <pre id="echoRawResponse" class="raw-code http-code echo-raw-response line-numbered" tabindex="0">Send the request to see a response.</pre>
                   </div>
                 </section>
               </div>
@@ -293,13 +336,17 @@
                     <div class="editor-subtitle">Paused message ready to continue, drop, or modify</div>
                   </div>
                   <div class="button-row">
+                    <div class="segmented compact-segmented">
+                      <button id="pendingRawBtn" class="segment active" type="button">Raw</button>
+                      <button id="pendingPrettyBtn" class="segment" type="button">Pretty</button>
+                    </div>
                     <button id="continueBtn" class="button ghost" type="button">Continue</button>
                     <button id="dropBtn" class="button danger" type="button">Drop</button>
                     <button id="modifyBtn" class="button primary" type="button">Modify</button>
                   </div>
                 </div>
 
-                <div class="editor-surface">
+                <div id="pendingRawView" class="editor-surface">
                   <section class="editor-section line-editor-section">
                     <div class="editor-section-title">Line</div>
                     <div id="requestFields" class="field-grid editor-line-grid">
@@ -335,6 +382,7 @@
                     <textarea id="editBody" class="editor-textarea body-textarea" spellcheck="false" placeholder="No body captured. Add or edit body content here before modifying the message."></textarea>
                   </section>
                 </div>
+                <div id="pendingPrettyView" class="pending-pretty-view hidden"></div>
               </div>
             </section>
           </div>
@@ -352,7 +400,7 @@
               </div>
               <label class="scope-toggle">
                 <input id="scopeEnabledToggle" type="checkbox" />
-                <span>Enable scope filtering</span>
+                <span>Apply include/exclude scope rules</span>
               </label>
             </section>
 
@@ -400,37 +448,29 @@
               <div id="proxySaveStatus" class="hint-line">Changing the port rebinds the proxy listener immediately.</div>
             </section>
 
+            <section class="panel settings-panel upstream-rules-panel">
+              <div class="panel-title-row">
+                <div>
+                  <h2>Upstreams</h2>
+                  <div class="panel-subtitle">Add named routes with domain, host, or URL rules</div>
+                </div>
+                <div class="button-row">
+                  <button id="addUpstreamRuleBtn" class="button ghost compact-button" type="button">+ Upstream</button>
+                  <button id="saveConfigBtn" class="button primary compact-button" type="button">Save Upstreams</button>
+                </div>
+              </div>
+              <div id="upstreamRulesList" class="upstream-rules-list"></div>
+            </section>
+
             <section class="panel settings-panel">
               <div class="panel-title-row">
-                <h2>Upstream</h2>
-                <button id="saveConfigBtn" class="button primary" type="button">Save</button>
+                <div>
+                  <h2>HTTPS</h2>
+                  <div class="panel-subtitle">CA certificate for browser import</div>
+                </div>
+                <a id="downloadCaCertBtn" class="button ghost" href="/api/https/ca-cert" download="veil-proxy-ca.crt">Download CA</a>
               </div>
-              <div class="field-grid">
-                <label>
-                  Mode
-                  <select id="upstreamMode">
-                    <option value="direct">Direct</option>
-                    <option value="http">HTTP proxy</option>
-                    <option value="socks5">SOCKS5</option>
-                  </select>
-                </label>
-                <label>
-                  Host
-                  <input id="upstreamHost" type="text" autocomplete="off" />
-                </label>
-                <label>
-                  Port
-                  <input id="upstreamPort" type="number" min="0" max="65535" autocomplete="off" />
-                </label>
-                <label>
-                  Username
-                  <input id="upstreamUsername" type="text" autocomplete="off" />
-                </label>
-                <label>
-                  Password
-                  <input id="upstreamPassword" type="password" autocomplete="off" />
-                </label>
-              </div>
+              <div class="hint-line">Import this certificate as a trusted certificate authority to inspect HTTPS traffic without browser warnings.</div>
             </section>
           </div>
         </section>
@@ -462,6 +502,8 @@
 
     <div id="contextMenu" class="context-menu hidden" role="menu">
       <button id="sendToEchoContextBtn" type="button" role="menuitem">Send to Echo</button>
+      <button id="addToScopeContextBtn" type="button" role="menuitem">Add to scope</button>
+      <button id="removeFromScopeContextBtn" type="button" role="menuitem">Remove from scope</button>
     </div>
 
     <script src="/app.js"></script>
