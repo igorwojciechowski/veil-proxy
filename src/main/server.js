@@ -1,8 +1,7 @@
-const path = require('path');
 const { createApp } = require('./veilApp');
 
 const app = createApp({
-  projectPath: process.env.VEIL_PROJECT_PATH || path.resolve(process.cwd(), 'veil-project.sqlite'),
+  projectPath: process.env.VEIL_PROJECT_PATH || null,
 });
 
 app

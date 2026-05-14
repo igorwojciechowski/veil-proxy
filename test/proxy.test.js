@@ -9,6 +9,7 @@ const path = require('node:path');
 const test = require('node:test');
 const { execFileSync } = require('node:child_process');
 const { createApp } = require('../src/main/veilApp');
+const { ProjectStore } = require('../src/main/projectStore');
 
 const socketReadBuffers = new WeakMap();
 
@@ -564,6 +565,7 @@ test('intercepts and inspects HTTPS requests inside CONNECT tunnels', async () =
   try {
     const response = await tunnelHttpsRequest(app.proxy.port, `127.0.0.1:${origin.port}`, '/secure?x=1', {
       ca: fs.readFileSync(app.proxy.certAuthority.caCertPath),
+      ALPNProtocols: ['h2', 'http/1.1'],
     });
 
     assert.match(response, /^HTTP\/1\.1 200 OK/);
@@ -580,6 +582,11 @@ test('intercepts and inspects HTTPS requests inside CONNECT tunnels', async () =
     assert.equal(flow.method, 'GET');
     assert.equal(flow.statusCode, 200);
     assert.equal(flow.host, `127.0.0.1:${origin.port}`);
+    const fullFlow = app.proxy.getFlow(flow.id);
+    assert.equal(fullFlow.request.protocol, 'HTTP/1.1');
+    assert.equal(fullFlow.request.alpnProtocol, 'http/1.1');
+    assert.equal(fullFlow.protocol.clientAlpn, 'http/1.1');
+    assert.equal(fullFlow.protocol.proxiedAs, 'HTTP/1.1');
   } finally {
     await app.stop();
     await origin.close();
@@ -894,6 +901,75 @@ test('persists config and captured HTTP history in a project database', async ()
   }
 });
 
+test('stores large captured bodies externally and hydrates them from the project database', async () => {
+  const origin = await createOriginServer();
+  const projectPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'veil-proxy-body-project-')), 'project.sqlite');
+  const app = createApp({
+    projectPath,
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+    },
+  });
+
+  await app.start();
+
+  let flowId;
+  const largeBody = 'body-'.repeat(6000);
+  try {
+    const target = `http://127.0.0.1:${origin.port}/large-body`;
+    const response = await proxyRequest(app.proxy.port, {
+      method: 'POST',
+      path: target,
+      headers: {
+        host: `127.0.0.1:${origin.port}`,
+        'content-type': 'text/plain',
+      },
+      body: largeBody,
+    });
+    assert.equal(response.statusCode, 200);
+
+    const summary = app.proxy.listHistory().find((item) => item.path === '/large-body');
+    assert.ok(summary);
+    flowId = summary.id;
+
+    const flow = app.proxy.getFlow(flowId);
+    assert.equal(flow.request.bodyText, largeBody);
+    assert.equal(JSON.parse(flow.response.bodyText).body, largeBody);
+
+    const statePayload = await apiRequest(app.api.port, '/api/state');
+    const apiSummary = statePayload.history.find((item) => item.id === flowId);
+    assert.ok(apiSummary);
+    assert.equal(apiSummary.request, undefined);
+    const apiFlow = await apiRequest(app.api.port, `/api/history/${flowId}`);
+    assert.equal(apiFlow.request.bodyText, largeBody);
+  } finally {
+    await app.stop();
+    await origin.close();
+  }
+
+  const store = new ProjectStore(projectPath);
+  try {
+    const row = store.db.prepare('SELECT flow_json FROM flows WHERE id = ?').get(flowId);
+    assert.ok(row);
+    const storedFlow = JSON.parse(row.flow_json);
+    assert.equal(storedFlow.request.bodyText, '');
+    assert.equal(storedFlow.request.bodyBase64, '');
+    assert.equal(storedFlow.request.bodyStorage.external, true);
+
+    const bodies = store.db.prepare('SELECT part, storage_encoding, original_bytes, stored_bytes FROM flow_bodies WHERE flow_id = ?').all(flowId);
+    assert.equal(bodies.some((body) => body.part === 'request' && body.storage_encoding === 'gzip-json'), true);
+    assert.equal(bodies.some((body) => body.part === 'response'), true);
+
+    const hydrated = store.loadHistory(10).find((flow) => flow.id === flowId);
+    assert.ok(hydrated);
+    assert.equal(hydrated.request.bodyText, largeBody);
+    assert.equal(JSON.parse(hydrated.response.bodyText).body, largeBody);
+  } finally {
+    store.close();
+  }
+});
+
 test('persists Echo tabs and groups through the UI state API', async () => {
   const projectPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'veil-proxy-echo-project-')), 'project.sqlite');
   let app = createApp({
@@ -947,8 +1023,8 @@ test('persists Echo tabs and groups through the UI state API', async () => {
                 host: ['example.test'],
               },
               extension: {
-                mode: 'exclude',
-                value: 'png, jpg, css, js',
+                include: '',
+                exclude: 'png, jpg, css, js',
               },
             },
           },
@@ -981,7 +1057,7 @@ test('persists Echo tabs and groups through the UI state API', async () => {
     assert.equal(state.ui.echo.selectedGroupId, 'group-one');
     assert.equal(state.ui.echo.split, 63);
     assert.equal(state.ui.traffic.presets[0].id, 'traffic-api');
-    assert.equal(state.ui.traffic.presets[0].filter.extension.mode, 'exclude');
+    assert.equal(state.ui.traffic.presets[0].filter.extension.exclude, 'png, jpg, css, js');
     assert.equal(state.ui.traffic.presets[0].filter.filters.status.includes('5xx'), true);
   } finally {
     await app.stop();
@@ -1032,15 +1108,63 @@ test('exports, clears, and imports project snapshots', async () => {
     assert.equal(exported.version, 1);
     assert.equal(exported.history.some((flow) => flow.request.url === target), true);
     assert.equal(exported.ui.echo.tabs[0].id, 'snapshot-tab');
+    assert.equal(Array.isArray(exported.findings), true);
 
-    const cleared = await apiRequest(app.api.port, '/api/history', 'DELETE');
+    const cleared = await apiRequest(app.api.port, '/api/project/new', 'POST');
     assert.equal(cleared.history.length, 0);
+    assert.equal(cleared.ui.echo.tabs.length, 0);
     assert.equal(app.proxy.listHistory().length, 0);
+    assert.equal((await apiRequest(app.api.port, '/api/findings')).length, 0);
 
     const imported = await apiRequest(app.api.port, '/api/project/import', 'POST', exported);
     assert.equal(imported.history.some((flow) => flow.url === target), true);
     assert.equal(imported.ui.echo.tabs[0].id, 'snapshot-tab');
     assert.equal(app.proxy.listHistory().some((flow) => flow.url === target), true);
+  } finally {
+    await app.stop();
+    await origin.close();
+  }
+});
+
+test('starts without a project file as an empty memory session', async () => {
+  const origin = await createOriginServer();
+  let app = createApp({
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+    },
+  });
+
+  await app.start();
+
+  try {
+    const target = `http://127.0.0.1:${origin.port}/memory-session`;
+    const response = await proxyRequest(app.proxy.port, {
+      method: 'GET',
+      path: target,
+      headers: {
+        host: `127.0.0.1:${origin.port}`,
+      },
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(app.proxy.listHistory().length, 1);
+  } finally {
+    await app.stop();
+  }
+
+  app = createApp({
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+    },
+  });
+  await app.start();
+
+  try {
+    const state = await apiRequest(app.api.port, '/api/state');
+    assert.equal(state.project, null);
+    assert.equal(state.history.length, 0);
+    assert.equal(state.ui.echo.tabs.length, 0);
   } finally {
     await app.stop();
     await origin.close();
@@ -1332,6 +1456,7 @@ async function tunnelHttpsRequest(proxyPort, authority, requestPath, options = {
     socket,
     ca: options.ca,
     rejectUnauthorized: true,
+    ALPNProtocols: options.ALPNProtocols,
     checkServerIdentity: () => undefined,
   });
   await once(tlsSocket, 'secureConnect');

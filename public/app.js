@@ -8,6 +8,7 @@ const state = {
   history: [],
   findings: [],
   pending: [],
+  desktopProject: null,
   selectedFlowId: null,
   selectedFlow: null,
   selectedPendingId: null,
@@ -20,13 +21,14 @@ const state = {
   },
   trafficInScopeOnly: false,
   trafficExtensionFilter: {
-    mode: 'off',
-    value: '',
+    include: '',
+    exclude: '',
   },
   trafficPresets: [],
   selectedTrafficPreset: '',
   trafficPersistenceReady: false,
   openTrafficFilter: '',
+  trafficAdvancedOpen: false,
   trafficSort: {
     key: 'id',
     direction: 'desc',
@@ -83,6 +85,9 @@ const el = {
   trafficTableWrap: document.querySelector('#trafficTableWrap'),
   trafficPaneResizer: document.querySelector('#trafficPaneResizer'),
   trafficRows: document.querySelector('#trafficRows'),
+  trafficAdvancedFilterBtn: document.querySelector('#trafficAdvancedFilterBtn'),
+  trafficAdvancedFilterBadge: document.querySelector('#trafficAdvancedFilterBadge'),
+  trafficAdvancedFilters: document.querySelector('#trafficAdvancedFilters'),
   trafficPresetSelect: document.querySelector('#trafficPresetSelect'),
   saveTrafficPresetBtn: document.querySelector('#saveTrafficPresetBtn'),
   deleteTrafficPresetBtn: document.querySelector('#deleteTrafficPresetBtn'),
@@ -90,8 +95,8 @@ const el = {
   trafficMethodFilter: document.querySelector('#trafficMethodFilter'),
   trafficStatusFilter: document.querySelector('#trafficStatusFilter'),
   trafficHostFilter: document.querySelector('#trafficHostFilter'),
-  trafficExtensionMode: document.querySelector('#trafficExtensionMode'),
-  trafficExtensionText: document.querySelector('#trafficExtensionText'),
+  trafficExtensionInclude: document.querySelector('#trafficExtensionInclude'),
+  trafficExtensionExclude: document.querySelector('#trafficExtensionExclude'),
   trafficScopeFilter: document.querySelector('#trafficScopeFilter'),
   resetTrafficFiltersBtn: document.querySelector('#resetTrafficFiltersBtn'),
   trafficFilterCount: document.querySelector('#trafficFilterCount'),
@@ -187,7 +192,9 @@ const el = {
   proxySaveStatus: document.querySelector('#proxySaveStatus'),
   projectName: document.querySelector('#projectName'),
   projectPath: document.querySelector('#projectPath'),
+  newProjectBtn: document.querySelector('#newProjectBtn'),
   exportProjectBtn: document.querySelector('#exportProjectBtn'),
+  saveProjectAsBtn: document.querySelector('#saveProjectAsBtn'),
   importProjectBtn: document.querySelector('#importProjectBtn'),
   importProjectInput: document.querySelector('#importProjectInput'),
   clearHistoryBtn: document.querySelector('#clearHistoryBtn'),
@@ -225,24 +232,24 @@ const SITE_HOST_ROW_HEIGHT = 74;
 const SITE_TREE_ROW_HEIGHT = 74;
 const STATIC_EXTENSIONS = 'jpg,jpeg,png,gif,webp,avif,svg,ico,css,js,map,woff,woff2,ttf,eot,otf';
 const BUILTIN_TRAFFIC_PRESETS = [
-  { id: 'all', name: 'All traffic', filter: { search: '', inScopeOnly: false, filters: { method: [], status: [], host: [] }, extension: { mode: 'off', value: '' } } },
-  { id: 'in-scope', name: 'Only in scope', filter: { search: '', inScopeOnly: true, filters: { method: [], status: [], host: [] }, extension: { mode: 'off', value: '' } } },
-  { id: 'errors', name: 'Only errors', filter: { search: '', inScopeOnly: false, filters: { method: [], status: ['error'], host: [] }, extension: { mode: 'off', value: '' } } },
+  { id: 'all', name: 'All traffic', filter: { search: '', inScopeOnly: false, filters: { method: [], status: [], host: [] }, extension: { include: '', exclude: '' } } },
+  { id: 'in-scope', name: 'Only in scope', filter: { search: '', inScopeOnly: true, filters: { method: [], status: [], host: [] }, extension: { include: '', exclude: '' } } },
+  { id: 'errors', name: 'Only errors', filter: { search: '', inScopeOnly: false, filters: { method: [], status: ['error'], host: [] }, extension: { include: '', exclude: '' } } },
   {
     id: 'auth-session',
     name: 'Auth/session',
-    filter: { search: 'auth,login,session,cookie,token,jwt,bearer,password,oauth', inScopeOnly: false, filters: { method: [], status: [], host: [] }, extension: { mode: 'off', value: '' } },
+    filter: { search: 'auth,login,session,cookie,token,jwt,bearer,password,oauth', inScopeOnly: false, filters: { method: [], status: [], host: [] }, extension: { include: '', exclude: '' } },
   },
   {
     id: 'api-only',
     name: 'API only',
-    filter: { search: '/api,/rest,/graphql,/v1,/v2', inScopeOnly: false, filters: { method: [], status: [], host: [] }, extension: { mode: 'exclude', value: STATIC_EXTENSIONS } },
+    filter: { search: '/api,/rest,/graphql,/v1,/v2', inScopeOnly: false, filters: { method: [], status: [], host: [] }, extension: { include: '', exclude: STATIC_EXTENSIONS } },
   },
-  { id: '4xx-5xx', name: '4xx/5xx', filter: { search: '', inScopeOnly: false, filters: { method: [], status: ['4xx', '5xx'], host: [] }, extension: { mode: 'off', value: '' } } },
+  { id: '4xx-5xx', name: '4xx/5xx', filter: { search: '', inScopeOnly: false, filters: { method: [], status: ['4xx', '5xx'], host: [] }, extension: { include: '', exclude: '' } } },
   {
     id: 'exclude-static-ext',
     name: 'Exclude static extensions',
-    filter: { search: '', inScopeOnly: false, filters: { method: [], status: [], host: [] }, extension: { mode: 'exclude', value: STATIC_EXTENSIONS } },
+    filter: { search: '', inScopeOnly: false, filters: { method: [], status: [], host: [] }, extension: { include: '', exclude: STATIC_EXTENSIONS } },
   },
 ];
 const SCOPE_PRESETS = {
@@ -299,17 +306,11 @@ function bindUi() {
   el.trafficPresetSelect.addEventListener('change', () => applyTrafficPreset(el.trafficPresetSelect.value));
   el.saveTrafficPresetBtn.addEventListener('click', saveCurrentTrafficPreset);
   el.deleteTrafficPresetBtn.addEventListener('click', deleteSelectedTrafficPreset);
-  el.trafficExtensionMode.addEventListener('change', () => {
-    state.trafficExtensionFilter.mode = el.trafficExtensionMode.value;
-    state.selectedTrafficPreset = '';
-    resetTrafficVirtualScroll();
-    renderTraffic();
-  });
-  el.trafficExtensionText.addEventListener('input', () => {
-    state.trafficExtensionFilter.value = el.trafficExtensionText.value;
-    state.selectedTrafficPreset = '';
-    resetTrafficVirtualScroll();
-    renderTraffic();
+  el.trafficExtensionInclude.addEventListener('input', () => updateTrafficExtensionFilter('include', el.trafficExtensionInclude.value));
+  el.trafficExtensionExclude.addEventListener('input', () => updateTrafficExtensionFilter('exclude', el.trafficExtensionExclude.value));
+  el.trafficAdvancedFilterBtn.addEventListener('click', () => {
+    state.trafficAdvancedOpen = !state.trafficAdvancedOpen;
+    renderTrafficAdvancedState();
   });
   [el.trafficMethodFilter, el.trafficStatusFilter, el.trafficHostFilter, el.trafficScopeFilter].forEach((container) => {
     container.addEventListener('change', handleTrafficCheckboxFilterChange);
@@ -473,8 +474,16 @@ function bindUi() {
   });
 
   el.saveProxyBtn.addEventListener('click', saveProxyConfig);
-  el.exportProjectBtn.addEventListener('click', exportProject);
-  el.importProjectBtn.addEventListener('click', () => el.importProjectInput.click());
+  el.newProjectBtn.addEventListener('click', newProject);
+  el.exportProjectBtn.addEventListener('click', () => saveProject(false));
+  el.saveProjectAsBtn.addEventListener('click', () => saveProject(true));
+  el.importProjectBtn.addEventListener('click', () => {
+    if (window.veilDesktop?.openProject) {
+      openDesktopProject();
+      return;
+    }
+    el.importProjectInput.click();
+  });
   el.importProjectInput.addEventListener('change', importSelectedProject);
   el.clearHistoryBtn.addEventListener('click', clearHistory);
   el.addIncludeScopeRuleBtn.addEventListener('click', () => addScopeRule('include'));
@@ -664,9 +673,9 @@ function renderConfig(options = {}) {
 
 function renderProject() {
   if (!el.projectName || !el.projectPath) return;
-  const project = state.project || {};
-  el.projectName.textContent = project.name || 'Memory session';
-  el.projectPath.textContent = project.path || 'No project file';
+  const project = state.desktopProject || state.project || {};
+  el.projectName.textContent = project.name || 'Unsaved project';
+  el.projectPath.textContent = project.path || 'Memory session - not saved yet';
 }
 
 function isActiveEditableIn(container) {
@@ -1076,11 +1085,11 @@ function renderTrafficFilterControls() {
   state.trafficFilters.method = state.trafficFilters.method.filter((method) => methods.includes(method));
   state.trafficFilters.host = state.trafficFilters.host.filter((host) => hosts.includes(host));
   renderTrafficPresetSelect();
-  if (document.activeElement !== el.trafficExtensionMode) {
-    el.trafficExtensionMode.value = state.trafficExtensionFilter.mode;
+  if (document.activeElement !== el.trafficExtensionInclude) {
+    el.trafficExtensionInclude.value = state.trafficExtensionFilter.include;
   }
-  if (document.activeElement !== el.trafficExtensionText) {
-    el.trafficExtensionText.value = state.trafficExtensionFilter.value;
+  if (document.activeElement !== el.trafficExtensionExclude) {
+    el.trafficExtensionExclude.value = state.trafficExtensionFilter.exclude;
   }
   el.deleteTrafficPresetBtn.disabled = !selectedCustomTrafficPreset();
   renderCheckboxFilter(
@@ -1102,6 +1111,17 @@ function renderTrafficFilterControls() {
     hosts.map((host) => [host, host]),
   );
   renderScopeFilter();
+  renderTrafficAdvancedState();
+}
+
+function updateTrafficExtensionFilter(key, value) {
+  state.trafficExtensionFilter = {
+    ...state.trafficExtensionFilter,
+    [key]: value,
+  };
+  state.selectedTrafficPreset = '';
+  resetTrafficVirtualScroll();
+  renderTraffic();
 }
 
 function renderCheckboxFilter(container, key, options) {
@@ -1226,8 +1246,8 @@ function currentTrafficFilterSnapshot() {
       host: [...state.trafficFilters.host],
     },
     extension: {
-      mode: state.trafficExtensionFilter.mode,
-      value: state.trafficExtensionFilter.value,
+      include: state.trafficExtensionFilter.include,
+      exclude: state.trafficExtensionFilter.exclude,
     },
   };
 }
@@ -1239,14 +1259,15 @@ function applyTrafficFilterSnapshot(snapshot) {
   state.trafficFilters = next.filters;
   state.trafficExtensionFilter = next.extension;
   el.trafficSearch.value = state.trafficSearch;
-  el.trafficExtensionMode.value = state.trafficExtensionFilter.mode;
-  el.trafficExtensionText.value = state.trafficExtensionFilter.value;
+  el.trafficExtensionInclude.value = state.trafficExtensionFilter.include;
+  el.trafficExtensionExclude.value = state.trafficExtensionFilter.exclude;
 }
 
 function normalizeTrafficFilterSnapshot(snapshot) {
   const raw = snapshot && typeof snapshot === 'object' ? snapshot : {};
   const filters = raw.filters && typeof raw.filters === 'object' ? raw.filters : {};
   const extension = raw.extension && typeof raw.extension === 'object' ? raw.extension : {};
+  const normalizedExtension = normalizeTrafficExtensionFilter(extension);
   return {
     search: String(raw.search || '').slice(0, 400),
     inScopeOnly: raw.inScopeOnly === true,
@@ -1255,10 +1276,16 @@ function normalizeTrafficFilterSnapshot(snapshot) {
       status: Array.isArray(filters.status) ? filters.status.map(String).filter(Boolean) : [],
       host: Array.isArray(filters.host) ? filters.host.map(String).filter(Boolean) : [],
     },
-    extension: {
-      mode: ['off', 'include', 'exclude'].includes(extension.mode) ? extension.mode : 'off',
-      value: String(extension.value || '').slice(0, 400),
-    },
+    extension: normalizedExtension,
+  };
+}
+
+function normalizeTrafficExtensionFilter(extension) {
+  const legacyMode = String(extension.mode || '');
+  const legacyValue = String(extension.value || '');
+  return {
+    include: String(extension.include ?? (legacyMode === 'include' ? legacyValue : '')).slice(0, 400),
+    exclude: String(extension.exclude ?? (legacyMode === 'exclude' ? legacyValue : '')).slice(0, 400),
   };
 }
 
@@ -1286,12 +1313,13 @@ function resetTrafficFilters() {
     host: [],
   };
   state.trafficInScopeOnly = false;
-  state.trafficExtensionFilter = { mode: 'off', value: '' };
+  state.trafficExtensionFilter = { include: '', exclude: '' };
   state.selectedTrafficPreset = '';
   state.openTrafficFilter = '';
+  state.trafficAdvancedOpen = false;
   el.trafficSearch.value = '';
-  el.trafficExtensionMode.value = 'off';
-  el.trafficExtensionText.value = '';
+  el.trafficExtensionInclude.value = '';
+  el.trafficExtensionExclude.value = '';
   resetTrafficVirtualScroll();
   renderTraffic();
 }
@@ -1323,11 +1351,37 @@ function handleTrafficCheckboxFilterChange(event) {
 }
 
 function closeTrafficFiltersOnOutside(event) {
-  if (event.target.closest('.multi-filter')) return;
-  state.openTrafficFilter = '';
-  document.querySelectorAll('.multi-filter[open]').forEach((details) => {
-    details.open = false;
-  });
+  const insideMultiFilter = event.target.closest('.multi-filter');
+  const insideAdvancedFilters = event.target.closest('#trafficAdvancedFilters, #trafficAdvancedFilterBtn');
+  if (!insideMultiFilter) {
+    state.openTrafficFilter = '';
+    document.querySelectorAll('.multi-filter[open]').forEach((details) => {
+      details.open = false;
+    });
+  }
+
+  if (!insideAdvancedFilters && state.trafficAdvancedOpen) {
+    state.trafficAdvancedOpen = false;
+    renderTrafficAdvancedState();
+  }
+}
+
+function renderTrafficAdvancedState() {
+  el.trafficAdvancedFilters.classList.toggle('hidden', !state.trafficAdvancedOpen);
+  el.trafficAdvancedFilterBtn.classList.toggle('active', state.trafficAdvancedOpen);
+  el.trafficAdvancedFilterBtn.setAttribute('aria-expanded', state.trafficAdvancedOpen ? 'true' : 'false');
+  const activeCount = advancedTrafficFilterCount();
+  el.trafficAdvancedFilterBadge.textContent = String(activeCount);
+  el.trafficAdvancedFilterBadge.classList.toggle('hidden', activeCount === 0);
+}
+
+function advancedTrafficFilterCount() {
+  let count = 0;
+  if (state.selectedTrafficPreset) count += 1;
+  if (state.trafficFilters.host.length > 0) count += 1;
+  if (state.trafficExtensionFilter.include.trim()) count += 1;
+  if (state.trafficExtensionFilter.exclude.trim()) count += 1;
+  return count;
 }
 
 function closeEchoGroupListOnOutside(event) {
@@ -2717,12 +2771,12 @@ function showContextFlows() {
     host: [],
   };
   state.trafficInScopeOnly = false;
-  state.trafficExtensionFilter = { mode: 'off', value: '' };
+  state.trafficExtensionFilter = { include: '', exclude: '' };
   state.selectedTrafficPreset = '';
   state.openTrafficFilter = '';
   el.trafficSearch.value = state.trafficSearch;
-  el.trafficExtensionMode.value = 'off';
-  el.trafficExtensionText.value = '';
+  el.trafficExtensionInclude.value = '';
+  el.trafficExtensionExclude.value = '';
   resetTrafficVirtualScroll();
   setView('traffic');
   renderTraffic();
@@ -2769,13 +2823,11 @@ function flowSearchIdSet(query) {
 }
 
 function matchesExtensionFilter(flow) {
-  const mode = state.trafficExtensionFilter.mode;
-  if (mode === 'off') return true;
-  const extensions = parseExtensionFilter(state.trafficExtensionFilter.value);
-  if (extensions.length === 0) return true;
   const extension = flowExtension(flow);
-  if (mode === 'include') return extension && extensions.includes(extension);
-  if (mode === 'exclude') return !extension || !extensions.includes(extension);
+  const included = parseExtensionFilter(state.trafficExtensionFilter.include);
+  const excluded = parseExtensionFilter(state.trafficExtensionFilter.exclude);
+  if (included.length > 0 && (!extension || !included.includes(extension))) return false;
+  if (excluded.length > 0 && extension && excluded.includes(extension)) return false;
   return true;
 }
 
@@ -2884,6 +2936,7 @@ function renderDetail() {
       startedAt: new Date(flow.startedAt).toISOString(),
       completedAt: flow.completedAt ? new Date(flow.completedAt).toISOString() : null,
       durationMs: flow.durationMs,
+      protocol: flow.protocol || null,
       tunnel: flow.tunnel || null,
       error: flow.error,
       notes: flow.notes || [],
@@ -2907,6 +2960,8 @@ function renderRequestPretty(flow) {
     ['Host', parsed?.host || headerValue(request.headers, 'host') || '-'],
     ['Path', path || '-'],
     ['Query', `${queryCount} ${queryCount === 1 ? 'param' : 'params'}`],
+    ['Protocol', protocolDisplay(request.protocol || protocolLabel(request.httpVersion))],
+    ['ALPN', protocolDisplay(request.alpnProtocol || flow.protocol?.clientAlpn)],
     ['Body', formatBytes(bodySize)],
   ]);
   el.requestQuery.innerHTML = renderQueryTable(parsed);
@@ -2927,6 +2982,8 @@ function renderResponsePretty(flow) {
   const bodySize = base64ByteLength(response.bodyBase64 || '');
   el.responseSummary.innerHTML = summaryCards([
     ['Status', `${response.statusCode} ${response.statusMessage || ''}`.trim()],
+    ['Protocol', protocolDisplay(response.protocol || protocolLabel(response.httpVersion))],
+    ['ALPN', protocolDisplay(response.alpnProtocol || flow.protocol?.upstreamAlpn)],
     ['Content-Type', headerValue(response.headers, 'content-type') || '-'],
     ['Body', formatBytes(bodySize)],
     ['Duration', flow.durationMs === null || flow.durationMs === undefined ? 'open' : `${flow.durationMs}ms`],
@@ -3022,7 +3079,8 @@ function buildRawResponse(flow) {
   }
 
   const response = flow.response;
-  const statusLine = `HTTP/1.1 ${response.statusCode || ''} ${response.statusMessage || ''}`.trim();
+  const version = response.httpVersion || '1.1';
+  const statusLine = `HTTP/${version} ${response.statusCode || ''} ${response.statusMessage || ''}`.trim();
   return buildRawMessage(statusLine, response.headers, rawBodyText(response));
 }
 
@@ -3031,6 +3089,15 @@ function buildRawMessage(startLine, headers, body) {
     .map(([name, value]) => `${name}: ${value}`)
     .join('\r\n');
   return `${startLine}\r\n${headerText}\r\n\r\n${body || ''}`;
+}
+
+function protocolLabel(httpVersion) {
+  const version = String(httpVersion || '').trim();
+  return version ? `HTTP/${version}` : '';
+}
+
+function protocolDisplay(value) {
+  return value ? String(value) : '-';
 }
 
 function setHighlightedHttp(target, raw) {
@@ -3732,17 +3799,29 @@ async function saveProxyConfig() {
   }
 }
 
-async function exportProject() {
-  flushEchoState();
-  el.projectActionStatus.textContent = 'Preparing project export...';
+async function saveProject(forceSaveAs = false) {
+  el.projectActionStatus.textContent = forceSaveAs ? 'Preparing Save As...' : 'Saving project...';
 
   try {
-    const response = await fetch('/api/project/export');
-    if (!response.ok) {
-      throw new Error(await response.text());
+    await syncProjectUiState();
+    const payload = await api('/api/project/export');
+    const filename = projectSnapshotFilename(payload);
+
+    if (window.veilDesktop?.saveProject) {
+      const result = await (forceSaveAs || !state.desktopProject?.path
+        ? window.veilDesktop.saveProjectAs(payload, filename)
+        : window.veilDesktop.saveProject(payload, filename));
+      if (result?.canceled) {
+        el.projectActionStatus.textContent = 'Save cancelled.';
+        return;
+      }
+      state.desktopProject = { name: result.name, path: result.path };
+      renderProject();
+      el.projectActionStatus.textContent = `Saved ${result.name}.`;
+      return;
     }
-    const blob = await response.blob();
-    const filename = downloadFilename(response.headers.get('content-disposition')) || `${state.project?.name || 'veil-project'}.json`;
+
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
@@ -3751,9 +3830,23 @@ async function exportProject() {
     link.click();
     link.remove();
     URL.revokeObjectURL(url);
-    el.projectActionStatus.textContent = `Exported ${filename}.`;
+    el.projectActionStatus.textContent = `Saved ${filename}.`;
   } catch (error) {
-    el.projectActionStatus.textContent = `Export failed: ${formatError(error)}`;
+    el.projectActionStatus.textContent = `Save failed: ${formatError(error)}`;
+  }
+}
+
+async function openDesktopProject() {
+  el.projectActionStatus.textContent = 'Opening project...';
+  try {
+    const result = await window.veilDesktop.openProject();
+    if (result?.canceled) {
+      el.projectActionStatus.textContent = 'Open cancelled.';
+      return;
+    }
+    await importProjectPayload(result.data, result.name, { name: result.name, path: result.path });
+  } catch (error) {
+    el.projectActionStatus.textContent = `Open failed: ${formatError(error)}`;
   }
 }
 
@@ -3761,24 +3854,68 @@ async function importSelectedProject() {
   const file = el.importProjectInput.files?.[0];
   if (!file) return;
 
-  el.projectActionStatus.textContent = `Importing ${file.name}...`;
+  el.projectActionStatus.textContent = `Opening ${file.name}...`;
   try {
     const text = await file.text();
-    const payload = await api('/api/project/import', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: text,
-    });
-    state.selectedFlowId = null;
-    state.selectedFlow = null;
-    applyState(payload, true);
-    await Promise.all([loadSiteMap(), loadFindings()]);
-    el.projectActionStatus.textContent = `Imported ${file.name}.`;
+    await importProjectPayload(JSON.parse(text), file.name, null);
   } catch (error) {
-    el.projectActionStatus.textContent = `Import failed: ${formatError(error)}`;
+    el.projectActionStatus.textContent = `Open failed: ${formatError(error)}`;
   } finally {
     el.importProjectInput.value = '';
   }
+}
+
+async function importProjectPayload(projectPayload, displayName, desktopProject) {
+  const payload = await api('/api/project/import', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(projectPayload || {}),
+  });
+  state.desktopProject = desktopProject;
+  state.selectedFlowId = null;
+  state.selectedFlow = null;
+  applyState(payload, true);
+  await Promise.all([loadSiteMap(), loadFindings()]);
+  el.projectActionStatus.textContent = `Opened ${displayName || 'project'}.`;
+}
+
+async function newProject() {
+  if (!window.confirm('Create a new empty project? Unsaved captured traffic and Echo tabs will be discarded.')) {
+    return;
+  }
+
+  el.projectActionStatus.textContent = 'Creating empty project...';
+  try {
+    const payload = await api('/api/project/new', { method: 'POST' });
+    state.desktopProject = null;
+    state.selectedFlowId = null;
+    state.selectedFlow = null;
+    if (window.veilDesktop?.forgetProject) {
+      await window.veilDesktop.forgetProject();
+    }
+    applyState(payload, true);
+    await Promise.all([loadSiteMap(), loadFindings()]);
+    el.projectActionStatus.textContent = 'New empty project ready.';
+  } catch (error) {
+    el.projectActionStatus.textContent = `New project failed: ${formatError(error)}`;
+  }
+}
+
+async function syncProjectUiState() {
+  syncSelectedEchoRequest();
+  await api('/api/ui-state', {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      echo: serializeEchoState(),
+      traffic: serializeTrafficUiState(),
+    }),
+  });
+}
+
+function projectSnapshotFilename(payload) {
+  const base = state.desktopProject?.name || payload?.project?.name || 'veil-project';
+  return `${String(base).replace(/\.veil\.json$/i, '').replace(/\.json$/i, '').replace(/[^a-z0-9._-]/gi, '-')}.veil.json`;
 }
 
 async function clearHistory() {

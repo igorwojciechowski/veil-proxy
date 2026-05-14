@@ -1,9 +1,11 @@
-const { app, BrowserWindow, Menu, dialog, shell } = require('electron');
+const { app, BrowserWindow, Menu, dialog, ipcMain, shell } = require('electron');
+const fs = require('fs/promises');
 const path = require('path');
 const { createApp } = require('../main/veilApp');
 
 let backend;
 let mainWindow;
+let currentProjectPath = null;
 
 async function createWindow() {
   app.setName('Veil Proxy');
@@ -12,7 +14,6 @@ async function createWindow() {
   let state;
   try {
     backend = createApp({
-      projectPath: path.join(app.getPath('userData'), 'projects', 'default.veil.sqlite'),
       config: {
         apiPort: 0,
       },
@@ -42,6 +43,7 @@ async function createWindow() {
             height: 32,
           },
     webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -61,6 +63,14 @@ async function createWindow() {
 
   await mainWindow.loadURL(`http://127.0.0.1:${state.apiPort}?desktop=1`);
 }
+
+ipcMain.handle('project:save', async (_event, request) => saveProjectFile(request, false));
+ipcMain.handle('project:save-as', async (_event, request) => saveProjectFile(request, true));
+ipcMain.handle('project:open', async () => openProjectFile());
+ipcMain.handle('project:forget', async () => {
+  currentProjectPath = null;
+  return { ok: true };
+});
 
 app.whenReady().then(createWindow);
 
@@ -158,4 +168,76 @@ function installEditableContextMenu(window) {
       { role: 'selectAll', enabled: params.editFlags.canSelectAll },
     ]).popup({ window });
   });
+}
+
+async function saveProjectFile(request = {}, forceSaveAs = false) {
+  const payload = request && typeof request === 'object' ? request.payload : null;
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('Project payload is empty.');
+  }
+
+  let targetPath = forceSaveAs ? null : currentProjectPath;
+  if (!targetPath) {
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: 'Save Veil Proxy Project',
+      defaultPath: defaultProjectPath(request.suggestedName),
+      filters: projectFileFilters(),
+    });
+    if (result.canceled || !result.filePath) {
+      return { canceled: true };
+    }
+    targetPath = ensureProjectExtension(result.filePath);
+  }
+
+  await fs.writeFile(targetPath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+  currentProjectPath = targetPath;
+  return {
+    canceled: false,
+    path: targetPath,
+    name: path.basename(targetPath),
+  };
+}
+
+async function openProjectFile() {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Open Veil Proxy Project',
+    properties: ['openFile'],
+    filters: projectFileFilters(),
+  });
+  if (result.canceled || !result.filePaths.length) {
+    return { canceled: true };
+  }
+
+  const targetPath = result.filePaths[0];
+  const text = await fs.readFile(targetPath, 'utf8');
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`Invalid project file: ${error.message}`);
+  }
+
+  currentProjectPath = targetPath;
+  return {
+    canceled: false,
+    path: targetPath,
+    name: path.basename(targetPath),
+    data,
+  };
+}
+
+function defaultProjectPath(suggestedName) {
+  const name = ensureProjectExtension(String(suggestedName || 'veil-project.veil.json').replace(/[/:\\]/g, '-'));
+  return path.join(app.getPath('documents'), name);
+}
+
+function ensureProjectExtension(filePath) {
+  return /\.veil\.json$/i.test(filePath) ? filePath : `${filePath.replace(/\.json$/i, '')}.veil.json`;
+}
+
+function projectFileFilters() {
+  return [
+    { name: 'Veil Proxy Project', extensions: ['veil.json', 'json'] },
+    { name: 'JSON', extensions: ['json'] },
+  ];
 }

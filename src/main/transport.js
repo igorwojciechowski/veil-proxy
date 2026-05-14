@@ -194,6 +194,8 @@ function requestHttpDirect({ targetUrl, method, headers, body, maxBodyBytes }) {
           resolve({
             statusCode: res.statusCode,
             statusMessage: res.statusMessage,
+            httpVersion: res.httpVersion || '1.1',
+            alpnProtocol: '',
             headers: res.headers,
             rawHeaders: res.rawHeaders,
             body: bodyBuffer,
@@ -385,6 +387,7 @@ function tlsConnectionOptions(socket, servername, options = {}) {
   const tlsOptions = {
     socket,
     rejectUnauthorized: !options.ignoreCertificateErrors,
+    ALPNProtocols: options.ALPNProtocols || ['http/1.1'],
   };
   if (!net.isIP(servername)) {
     tlsOptions.servername = servername;
@@ -445,7 +448,7 @@ function readRawHttpResponse(socket, maxBodyBytes) {
     const headerText = head.toString('latin1');
     const lines = headerText.split('\r\n');
     const statusLine = lines.shift() || '';
-    const match = statusLine.match(/^HTTP\/\d\.\d\s+(\d{3})\s*(.*)$/);
+    const match = statusLine.match(/^HTTP\/(\d\.\d)\s+(\d{3})\s*(.*)$/);
     if (!match) {
       throw new Error(`Invalid upstream HTTP response: ${statusLine}`);
     }
@@ -468,7 +471,7 @@ function readRawHttpResponse(socket, maxBodyBytes) {
     let reusable = true;
     let body;
 
-    if (hasEmptyResponseBody(Number(match[1]))) {
+    if (hasEmptyResponseBody(Number(match[2]))) {
       stashSocketBuffer(socket, rest);
       body = Buffer.alloc(0);
       body.truncated = false;
@@ -482,8 +485,10 @@ function readRawHttpResponse(socket, maxBodyBytes) {
     }
 
     return {
-      statusCode: Number(match[1]),
-      statusMessage: match[2] || '',
+      statusCode: Number(match[2]),
+      statusMessage: match[3] || '',
+      httpVersion: match[1],
+      alpnProtocol: socket.alpnProtocol || '',
       headers,
       rawHeaders,
       body,

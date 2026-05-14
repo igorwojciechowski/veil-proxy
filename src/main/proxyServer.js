@@ -309,10 +309,19 @@ class ProxyServer extends EventEmitter {
       startedAt,
       completedAt: null,
       durationMs: null,
+      protocol: {
+        client: protocolLabel(clientReq.httpVersion),
+        clientAlpn: normalizeAlpnProtocol(clientReq.socket && clientReq.socket.alpnProtocol),
+        proxiedAs: 'HTTP/1.1',
+        upstream: null,
+        upstreamAlpn: '',
+      },
       request: {
         method: clientReq.method,
         url: target.href,
         httpVersion: clientReq.httpVersion,
+        protocol: protocolLabel(clientReq.httpVersion),
+        alpnProtocol: normalizeAlpnProtocol(clientReq.socket && clientReq.socket.alpnProtocol),
         headers: headersArrayToObject(clientReq.rawHeaders),
         bodyBase64: body.toString('base64'),
         bodyText: decodeBody(clientReq.headers, body).text,
@@ -363,9 +372,14 @@ class ProxyServer extends EventEmitter {
       });
 
       const decoded = decodeBody(upstreamResponse.headers, upstreamResponse.body);
+      flow.protocol.upstream = protocolLabel(upstreamResponse.httpVersion || '1.1');
+      flow.protocol.upstreamAlpn = normalizeAlpnProtocol(upstreamResponse.alpnProtocol);
       flow.response = {
         statusCode: upstreamResponse.statusCode,
         statusMessage: upstreamResponse.statusMessage,
+        httpVersion: upstreamResponse.httpVersion || '1.1',
+        protocol: protocolLabel(upstreamResponse.httpVersion || '1.1'),
+        alpnProtocol: normalizeAlpnProtocol(upstreamResponse.alpnProtocol),
         headers: headersArrayToObject(upstreamResponse.rawHeaders),
         bodyBase64: upstreamResponse.body.toString('base64'),
         bodyText: decoded.text,
@@ -442,10 +456,19 @@ class ProxyServer extends EventEmitter {
       startedAt,
       completedAt: null,
       durationMs: null,
+      protocol: {
+        client: protocolLabel(req.httpVersion),
+        clientAlpn: '',
+        proxiedAs: 'TCP tunnel',
+        upstream: '',
+        upstreamAlpn: '',
+      },
       request: {
         method: 'CONNECT',
         url: req.url,
         httpVersion: req.httpVersion,
+        protocol: protocolLabel(req.httpVersion),
+        alpnProtocol: '',
         headers: headersArrayToObject(req.rawHeaders),
         bodyBase64: '',
         bodyText: '',
@@ -658,6 +681,7 @@ class ProxyServer extends EventEmitter {
       statusMessage: flow.response ? flow.response.statusMessage : null,
       requestBytes: Buffer.byteLength(flow.request.bodyBase64 || '', 'base64'),
       responseBytes: flow.response ? Buffer.byteLength(flow.response.bodyBase64 || '', 'base64') : null,
+      protocol: flow.protocol || protocolSummaryFromFlow(flow),
       tunnel: flow.tunnel || null,
       error: flow.error,
       notes: flow.notes,
@@ -803,6 +827,25 @@ function safeUrlParts(url) {
       scheme: '',
     };
   }
+}
+
+function protocolLabel(httpVersion) {
+  const version = String(httpVersion || '').trim();
+  return version ? `HTTP/${version}` : '';
+}
+
+function normalizeAlpnProtocol(value) {
+  return value && value !== false ? String(value) : '';
+}
+
+function protocolSummaryFromFlow(flow) {
+  return {
+    client: flow?.request?.protocol || protocolLabel(flow?.request?.httpVersion),
+    clientAlpn: normalizeAlpnProtocol(flow?.request?.alpnProtocol),
+    proxiedAs: flow?.type === 'http' ? 'HTTP/1.1' : '',
+    upstream: flow?.response?.protocol || protocolLabel(flow?.response?.httpVersion),
+    upstreamAlpn: normalizeAlpnProtocol(flow?.response?.alpnProtocol),
+  };
 }
 
 function sanitizeEchoRequest(payload) {

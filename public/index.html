@@ -104,12 +104,6 @@
           <div class="split-grid traffic-split" id="trafficSplit">
             <section class="panel traffic-panel">
               <div class="traffic-filter-bar">
-                <label class="traffic-preset-label">
-                  Preset
-                  <select id="trafficPresetSelect"></select>
-                </label>
-                <button id="saveTrafficPresetBtn" class="button ghost compact-button" type="button">Save Preset</button>
-                <button id="deleteTrafficPresetBtn" class="button ghost compact-button" type="button">Delete Preset</button>
                 <label class="traffic-search-label">
                   Search
                   <input id="trafficSearch" class="search-input" type="search" placeholder="ID, host, path, method, status" />
@@ -122,27 +116,39 @@
                   Status
                   <div id="trafficStatusFilter" class="checkbox-filter-list"></div>
                 </div>
-                <div class="traffic-filter-group traffic-host-filter">
-                  Host
-                  <div id="trafficHostFilter" class="checkbox-filter-list"></div>
-                </div>
-                <label class="traffic-extension-mode-label">
-                  Ext mode
-                  <select id="trafficExtensionMode">
-                    <option value="off">Off</option>
-                    <option value="include">Include</option>
-                    <option value="exclude">Exclude</option>
-                  </select>
-                </label>
-                <label class="traffic-extension-label">
-                  Extensions
-                  <input id="trafficExtensionText" class="search-input" type="text" placeholder="js, css, png" />
-                </label>
                 <div class="traffic-filter-group traffic-scope-filter">
                   <div id="trafficScopeFilter" class="checkbox-filter-list"></div>
                 </div>
                 <button id="resetTrafficFiltersBtn" class="button ghost compact-button" type="button">Reset</button>
+                <button id="trafficAdvancedFilterBtn" class="traffic-advanced-toggle" type="button" aria-label="Advanced filters" aria-expanded="false">
+                  <span class="filter-icon" aria-hidden="true"></span>
+                  <span id="trafficAdvancedFilterBadge" class="filter-badge hidden">0</span>
+                </button>
                 <span id="trafficFilterCount" class="filter-count">0 shown</span>
+                <div id="trafficAdvancedFilters" class="traffic-advanced-popover hidden">
+                  <div class="traffic-advanced-grid">
+                    <label class="traffic-preset-label">
+                      Preset
+                      <select id="trafficPresetSelect"></select>
+                    </label>
+                    <div class="traffic-preset-actions">
+                      <button id="saveTrafficPresetBtn" class="button ghost compact-button" type="button">Save Preset</button>
+                      <button id="deleteTrafficPresetBtn" class="button ghost compact-button" type="button">Delete Preset</button>
+                    </div>
+                    <div class="traffic-filter-group traffic-host-filter">
+                      Host
+                      <div id="trafficHostFilter" class="checkbox-filter-list"></div>
+                    </div>
+                    <label class="traffic-extension-label">
+                      Ext included
+                      <input id="trafficExtensionInclude" class="search-input" type="text" placeholder="json, html, js" />
+                    </label>
+                    <label class="traffic-extension-label">
+                      Ext excluded
+                      <input id="trafficExtensionExclude" class="search-input" type="text" placeholder="png, jpg, css" />
+                    </label>
+                  </div>
+                </div>
               </div>
               <div id="trafficTableWrap" class="table-wrap">
                 <table class="traffic-table">
@@ -493,14 +499,16 @@
                   <div id="projectName" class="panel-subtitle">Memory session</div>
                 </div>
                 <div class="button-row">
-                  <button id="exportProjectBtn" class="button ghost compact-button" type="button">Export</button>
-                  <button id="importProjectBtn" class="button ghost compact-button" type="button">Import</button>
+                  <button id="newProjectBtn" class="button ghost compact-button" type="button">New</button>
+                  <button id="exportProjectBtn" class="button primary compact-button" type="button">Save</button>
+                  <button id="saveProjectAsBtn" class="button ghost compact-button" type="button">Save As</button>
+                  <button id="importProjectBtn" class="button ghost compact-button" type="button">Open</button>
                   <button id="clearHistoryBtn" class="button danger compact-button" type="button">Clear History</button>
                 </div>
               </div>
               <div id="projectPath" class="project-path">No project file</div>
               <input id="importProjectInput" class="hidden" type="file" accept="application/json,.json" />
-              <div id="projectActionStatus" class="hint-line">Project stores proxy config, captured traffic, and Echo tabs.</div>
+              <div id="projectActionStatus" class="hint-line">Projects store proxy config, captured traffic, Echo tabs, presets, and findings snapshots.</div>
             </section>
 
             <section class="panel settings-panel">

@@ -83,6 +83,13 @@ class ApiServer {
         return;
       }
 
+      if (parsed.pathname === '/api/project/new' && req.method === 'POST') {
+        const state = await this.newProject();
+        this.broadcast('state', state);
+        this.json(res, state);
+        return;
+      }
+
       if (parsed.pathname === '/api/ui-state' && req.method === 'GET') {
         this.json(res, this.getUiState());
         return;
@@ -238,17 +245,19 @@ class ApiServer {
   }
 
   exportProject() {
-    if (this.store) {
-      return this.store.exportData();
-    }
-
+    const data = this.store
+      ? this.store.exportData()
+      : {
+          version: 1,
+          exportedAt: new Date().toISOString(),
+          project: null,
+          config: this.proxy.getConfig(),
+          ui: this.getUiState(),
+          history: this.proxy.history || [],
+        };
     return {
-      version: 1,
-      exportedAt: new Date().toISOString(),
-      project: null,
-      config: this.proxy.getConfig(),
-      ui: this.getUiState(),
-      history: this.proxy.history || [],
+      ...data,
+      findings: this.proxy.getFindings(),
     };
   }
 
@@ -275,6 +284,24 @@ class ApiServer {
         config: this.proxy.getConfig(),
         ui: this.memoryUiState,
         history: this.proxy.history,
+      });
+    }
+
+    return this.statePayload();
+  }
+
+  async newProject() {
+    this.proxy.replaceHistory([], { persist: false });
+    this.memoryUiState = {
+      echo: defaultEchoUiState(),
+      traffic: defaultTrafficUiState(),
+    };
+
+    if (this.store) {
+      this.store.importData({
+        config: this.proxy.getConfig(),
+        ui: this.memoryUiState,
+        history: [],
       });
     }
 
@@ -452,6 +479,8 @@ function sanitizeTrafficFilterSnapshot(value) {
   const raw = value && typeof value === 'object' ? value : {};
   const filters = raw.filters && typeof raw.filters === 'object' ? raw.filters : {};
   const extension = raw.extension && typeof raw.extension === 'object' ? raw.extension : {};
+  const legacyMode = String(extension.mode || '');
+  const legacyValue = trimText(extension.value || '', 400);
 
   return {
     search: trimText(raw.search || '', 400),
@@ -462,8 +491,8 @@ function sanitizeTrafficFilterSnapshot(value) {
       host: sanitizeStringList(filters.host, 120, 240),
     },
     extension: {
-      mode: ['off', 'include', 'exclude'].includes(extension.mode) ? extension.mode : 'off',
-      value: trimText(extension.value || '', 400),
+      include: trimText(extension.include ?? (legacyMode === 'include' ? legacyValue : ''), 400),
+      exclude: trimText(extension.exclude ?? (legacyMode === 'exclude' ? legacyValue : ''), 400),
     },
   };
 }

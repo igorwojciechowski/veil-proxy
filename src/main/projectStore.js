@@ -1,5 +1,8 @@
 const fs = require('fs');
 const path = require('path');
+const zlib = require('zlib');
+
+const BODY_EXTERNALIZE_THRESHOLD_BYTES = 16 * 1024;
 
 class ProjectStore {
   constructor(projectPath) {
@@ -10,6 +13,7 @@ class ProjectStore {
     this.path = path.resolve(projectPath);
     fs.mkdirSync(path.dirname(this.path), { recursive: true });
     this.db = createDatabase(this.path);
+    this.inTransaction = false;
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
     this.prepareSchema();
     this.prepareStatements();
@@ -33,6 +37,17 @@ class ProjectStore {
         type TEXT,
         status_code INTEGER,
         flow_json TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS flow_bodies (
+        flow_id TEXT NOT NULL,
+        part TEXT NOT NULL,
+        storage_encoding TEXT NOT NULL,
+        body_json BLOB NOT NULL,
+        original_bytes INTEGER NOT NULL,
+        stored_bytes INTEGER NOT NULL,
+        PRIMARY KEY (flow_id, part),
+        FOREIGN KEY (flow_id) REFERENCES flows(id) ON DELETE CASCADE
       );
 
       CREATE INDEX IF NOT EXISTS flows_started_at_idx ON flows(started_at DESC);
@@ -63,6 +78,21 @@ class ProjectStore {
           status_code = excluded.status_code,
           flow_json = excluded.flow_json
       `),
+      deleteFlowBodies: this.db.prepare('DELETE FROM flow_bodies WHERE flow_id = ?'),
+      upsertFlowBody: this.db.prepare(`
+        INSERT INTO flow_bodies (flow_id, part, storage_encoding, body_json, original_bytes, stored_bytes)
+        VALUES (@flowId, @part, @storageEncoding, @bodyJson, @originalBytes, @storedBytes)
+        ON CONFLICT(flow_id, part) DO UPDATE SET
+          storage_encoding = excluded.storage_encoding,
+          body_json = excluded.body_json,
+          original_bytes = excluded.original_bytes,
+          stored_bytes = excluded.stored_bytes
+      `),
+      getFlowBodies: this.db.prepare(`
+        SELECT part, storage_encoding, body_json
+        FROM flow_bodies
+        WHERE flow_id = ?
+      `),
       listFlows: this.db.prepare(`
         SELECT flow_json
         FROM flows
@@ -79,6 +109,7 @@ class ProjectStore {
         )
       `),
       deleteFlows: this.db.prepare('DELETE FROM flows'),
+      deleteAllFlowBodies: this.db.prepare('DELETE FROM flow_bodies'),
       deleteMeta: this.db.prepare('DELETE FROM meta'),
     };
   }
@@ -103,7 +134,7 @@ class ProjectStore {
     const safeLimit = normalizeLimit(limit);
     return this.statements.listFlows
       .all(safeLimit)
-      .map((row) => parseJson(row.flow_json, null))
+      .map((row) => this.hydrateStoredFlow(parseJson(row.flow_json, null)))
       .filter(Boolean);
   }
 
@@ -121,6 +152,7 @@ class ProjectStore {
   importData(data) {
     const normalized = normalizeProjectData(data);
     this.runTransaction(() => {
+      this.statements.deleteAllFlowBodies.run();
       this.statements.deleteFlows.run();
       this.statements.deleteMeta.run();
       this.setConfig(normalized.config || {});
@@ -139,18 +171,43 @@ class ProjectStore {
       return;
     }
 
-    const url = flow.request.url || '';
-    this.statements.upsertFlow.run({
-      id: String(flow.id),
-      startedAt: Number(flow.startedAt || Date.now()),
-      completedAt: flow.completedAt == null ? null : Number(flow.completedAt),
-      method: String(flow.request.method || ''),
-      url,
-      host: flow.type === 'connect' ? String(flow.tunnel?.host || '') : safeHost(url),
-      type: String(flow.type || ''),
-      statusCode: flow.response?.statusCode == null ? null : Number(flow.response.statusCode),
-      flowJson: JSON.stringify(flow),
-    });
+    const write = () => {
+      const prepared = prepareFlowForStorage(flow);
+      const url = prepared.flow.request.url || '';
+      this.statements.upsertFlow.run({
+        id: String(prepared.flow.id),
+        startedAt: Number(prepared.flow.startedAt || Date.now()),
+        completedAt: prepared.flow.completedAt == null ? null : Number(prepared.flow.completedAt),
+        method: String(prepared.flow.request.method || ''),
+        url,
+        host: prepared.flow.type === 'connect' ? String(prepared.flow.tunnel?.host || '') : safeHost(url),
+        type: String(prepared.flow.type || ''),
+        statusCode: prepared.flow.response?.statusCode == null ? null : Number(prepared.flow.response.statusCode),
+        flowJson: JSON.stringify(prepared.flow),
+      });
+      this.statements.deleteFlowBodies.run(String(prepared.flow.id));
+      for (const body of prepared.bodies) {
+        this.statements.upsertFlowBody.run(body);
+      }
+    };
+
+    this.runTransaction(write);
+  }
+
+  hydrateStoredFlow(flow) {
+    if (!flow || !flow.id) {
+      return null;
+    }
+
+    const rows = this.statements.getFlowBodies.all(String(flow.id));
+    if (rows.length === 0) {
+      return flow;
+    }
+
+    const bodies = new Map(rows.map((row) => [row.part, row]));
+    hydrateMessageBody(flow.request, bodies.get('request'));
+    hydrateMessageBody(flow.response, bodies.get('response'));
+    return flow;
   }
 
   pruneHistory(limit) {
@@ -158,7 +215,10 @@ class ProjectStore {
   }
 
   clearHistory() {
-    this.statements.deleteFlows.run();
+    this.runTransaction(() => {
+      this.statements.deleteAllFlowBodies.run();
+      this.statements.deleteFlows.run();
+    });
   }
 
   info() {
@@ -173,6 +233,11 @@ class ProjectStore {
   }
 
   runTransaction(fn) {
+    if (this.inTransaction) {
+      return fn();
+    }
+
+    this.inTransaction = true;
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const result = fn();
@@ -181,6 +246,8 @@ class ProjectStore {
     } catch (error) {
       this.db.exec('ROLLBACK');
       throw error;
+    } finally {
+      this.inTransaction = false;
     }
   }
 
@@ -242,6 +309,83 @@ function parseJson(value, fallback) {
   } catch {
     return fallback;
   }
+}
+
+function prepareFlowForStorage(flow) {
+  const stored = structuredClone(flow);
+  const bodies = [];
+  externalizeMessageBody(stored, 'request', bodies);
+  externalizeMessageBody(stored, 'response', bodies);
+  return { flow: stored, bodies };
+}
+
+function externalizeMessageBody(flow, part, bodies) {
+  const message = flow && flow[part];
+  if (!message || !shouldExternalizeMessageBody(message)) {
+    return;
+  }
+
+  const payloadBuffer = Buffer.from(
+    JSON.stringify({
+      bodyBase64: typeof message.bodyBase64 === 'string' ? message.bodyBase64 : '',
+      bodyText: typeof message.bodyText === 'string' ? message.bodyText : '',
+    }),
+    'utf8',
+  );
+  const compressed = zlib.gzipSync(payloadBuffer);
+  const useCompressed = compressed.length < payloadBuffer.length;
+  const bodyJson = useCompressed ? compressed : payloadBuffer;
+
+  bodies.push({
+    flowId: String(flow.id),
+    part,
+    storageEncoding: useCompressed ? 'gzip-json' : 'json',
+    bodyJson,
+    originalBytes: payloadBuffer.length,
+    storedBytes: bodyJson.length,
+  });
+
+  message.bodyStorage = {
+    external: true,
+    part,
+    storageEncoding: useCompressed ? 'gzip-json' : 'json',
+    originalBytes: payloadBuffer.length,
+    storedBytes: bodyJson.length,
+    bodyBytes: base64ByteLength(message.bodyBase64 || ''),
+    textBytes: Buffer.byteLength(message.bodyText || '', 'utf8'),
+  };
+  message.bodyBase64 = '';
+  message.bodyText = '';
+}
+
+function shouldExternalizeMessageBody(message) {
+  const bodyBytes = base64ByteLength(message.bodyBase64 || '');
+  const textBytes = Buffer.byteLength(message.bodyText || '', 'utf8');
+  return bodyBytes >= BODY_EXTERNALIZE_THRESHOLD_BYTES || textBytes >= BODY_EXTERNALIZE_THRESHOLD_BYTES;
+}
+
+function hydrateMessageBody(message, row) {
+  if (!message || !message.bodyStorage || !message.bodyStorage.external || !row) {
+    return;
+  }
+
+  const raw = Buffer.isBuffer(row.body_json) ? row.body_json : Buffer.from(row.body_json || []);
+  const jsonBuffer = row.storage_encoding === 'gzip-json' ? zlib.gunzipSync(raw) : raw;
+  const payload = parseJson(jsonBuffer.toString('utf8'), {});
+  message.bodyBase64 = typeof payload.bodyBase64 === 'string' ? payload.bodyBase64 : '';
+  message.bodyText = typeof payload.bodyText === 'string' ? payload.bodyText : '';
+  message.bodyStorage = {
+    ...message.bodyStorage,
+    loaded: true,
+  };
+}
+
+function base64ByteLength(value) {
+  const text = String(value || '');
+  if (!text) return 0;
+  const clean = text.replace(/\s+/g, '');
+  const padding = clean.endsWith('==') ? 2 : clean.endsWith('=') ? 1 : 0;
+  return Math.max(0, Math.floor((clean.length * 3) / 4) - padding);
 }
 
 function normalizeProjectData(data) {
