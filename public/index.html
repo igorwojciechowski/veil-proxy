@@ -22,6 +22,10 @@
             <span class="nav-icon">⇄</span>
             <span>Traffic</span>
           </button>
+          <button class="nav-item" type="button" data-view="search" title="Search">
+            <span class="nav-icon">⌕</span>
+            <span>Search</span>
+          </button>
           <button class="nav-item" type="button" data-view="siteMap" title="Site Map">
             <span class="nav-icon">☷</span>
             <span>Site Map</span>
@@ -172,7 +176,7 @@
             <div id="trafficPaneResizer" class="traffic-pane-resizer" role="separator" aria-label="Resize traffic panels"></div>
 
             <section class="panel detail-panel">
-              <div id="emptyDetail" class="empty-state">Select a flow</div>
+              <div id="emptyDetail" class="empty-state">Select a request</div>
               <div id="flowDetail" class="detail-content hidden">
                 <div class="detail-header">
                   <div>
@@ -246,6 +250,28 @@
               </div>
             </section>
           </div>
+          </div>
+        </section>
+
+        <section id="searchView" class="view">
+          <div class="search-layout">
+            <section class="panel search-panel">
+              <div class="panel-title-row">
+                <div>
+                  <h2>Search</h2>
+                  <div id="globalSearchStatus" class="panel-subtitle">Search across requests, responses, headers, bodies, and metadata</div>
+                </div>
+                <button id="globalSearchClearBtn" class="button ghost compact-button" type="button">Clear</button>
+              </div>
+              <div class="search-command-bar">
+                <label class="global-search-label">
+                  Query
+                  <input id="globalSearchInput" class="search-input" type="search" placeholder="token, header, path, status, body text" autocomplete="off" />
+                </label>
+                <button id="globalSearchBtn" class="button primary" type="button">Search</button>
+              </div>
+              <div id="globalSearchResults" class="global-search-results"></div>
+            </section>
           </div>
         </section>
 
@@ -509,6 +535,20 @@
               <div id="projectPath" class="project-path">No project file</div>
               <input id="importProjectInput" class="hidden" type="file" accept="application/json,.json" />
               <div id="projectActionStatus" class="hint-line">Projects store proxy config, captured traffic, Echo tabs, presets, and findings snapshots.</div>
+              <div class="recent-projects">
+                <div class="recent-projects-header">
+                  <span>Recent projects</span>
+                  <button id="clearRecentProjectsBtn" class="button ghost compact-button" type="button">Clear</button>
+                </div>
+                <div id="recentProjectsList" class="recent-projects-list"></div>
+              </div>
+              <div class="project-checkpoints">
+                <div class="project-checkpoints-header">
+                  <span>Checkpoints</span>
+                  <button id="clearProjectCheckpointsBtn" class="button ghost compact-button" type="button">Clear</button>
+                </div>
+                <div id="projectCheckpointsList" class="project-checkpoints-list"></div>
+              </div>
             </section>
 
             <section class="panel settings-panel">
@@ -527,6 +567,40 @@
                 </label>
               </div>
               <div id="proxySaveStatus" class="hint-line">Changing the port rebinds the proxy listener immediately.</div>
+            </section>
+
+            <section class="panel settings-panel mcp-panel">
+              <div class="panel-title-row">
+                <div>
+                  <h2>MCP</h2>
+                  <div class="panel-subtitle">Anonymized LLM access to captured traffic and secret aliases</div>
+                </div>
+                <button id="saveMcpBtn" class="button primary compact-button" type="button">Apply MCP</button>
+              </div>
+              <div class="field-grid mcp-field-grid">
+                <label class="inline-check settings-inline-check">
+                  <span>Enabled</span>
+                  <input id="mcpEnabledToggle" type="checkbox" />
+                </label>
+                <label>
+                  Port
+                  <input id="mcpPort" type="number" min="0" max="65535" autocomplete="off" />
+                </label>
+                <label class="mcp-token-field">
+                  Token
+                  <input id="mcpToken" type="text" autocomplete="off" spellcheck="false" />
+                </label>
+                <label class="inline-check settings-inline-check">
+                  <span>Require scope</span>
+                  <input id="mcpRequireScopeToggle" type="checkbox" />
+                </label>
+                <label class="inline-check settings-inline-check">
+                  <span>Active testing</span>
+                  <input id="mcpActiveTestingToggle" type="checkbox" />
+                </label>
+              </div>
+              <div id="mcpEndpoint" class="mcp-endpoint">MCP disabled</div>
+              <div id="mcpStatus" class="hint-line">MCP returns anonymized data only. Real secret values are never returned.</div>
             </section>
 
             <section class="panel settings-panel upstream-rules-panel">

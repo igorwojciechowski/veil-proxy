@@ -13,7 +13,7 @@ const { ProjectStore } = require('../src/main/projectStore');
 
 const socketReadBuffers = new WeakMap();
 
-test('forwards plaintext HTTP requests and records the flow', async () => {
+test('forwards plaintext HTTP requests and records the request', async () => {
   const origin = await createOriginServer();
   const app = createApp({
     config: {
@@ -771,6 +771,458 @@ test('builds passive findings from captured traffic', async () => {
   }
 });
 
+test('searches captured requests across metadata headers and bodies', async () => {
+  const origin = await createOriginServer();
+  const app = createApp({
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+    },
+  });
+
+  await app.start();
+
+  try {
+    const target = `http://127.0.0.1:${origin.port}/api/searchable?mode=global`;
+    const response = await proxyRequest(app.proxy.port, {
+      method: 'POST',
+      path: target,
+      headers: {
+        host: `127.0.0.1:${origin.port}`,
+        'content-type': 'text/plain',
+        'x-search-token': 'needle-header',
+      },
+      body: 'needle-body',
+    });
+    assert.equal(response.statusCode, 200);
+
+    const bodySearch = await apiRequest(app.api.port, '/api/search?q=needle-body');
+    assert.equal(bodySearch.count, 1);
+    assert.equal(bodySearch.results[0].request.method, 'POST');
+    assert.equal(bodySearch.results[0].matches.some((match) => match.area === 'Request' && match.label === 'Body'), true);
+
+    const headerSearch = await apiRequest(app.api.port, '/api/search?q=needle-header');
+    assert.equal(headerSearch.count, 1);
+    assert.equal(headerSearch.results[0].matches.some((match) => match.area === 'Request' && match.label === 'Headers'), true);
+  } finally {
+    await app.stop();
+    await origin.close();
+  }
+});
+
+test('serves MCP tool calls with anonymized HTTP output', async () => {
+  const app = createApp({
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+      mcp: {
+        enabled: true,
+        port: 0,
+        token: 'test-token',
+      },
+    },
+  });
+
+  await app.start();
+
+  try {
+    assert.equal(app.mcp.state().running, true);
+
+    const listed = await mcpRpc(app, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/list',
+      params: {},
+    });
+    assert.equal(listed.result.tools.some((tool) => tool.name === 'anonymize_http'), true);
+    assert.equal(listed.result.tools.some((tool) => tool.name === 'get_proxy_item'), true);
+    assert.equal(listed.result.tools.some((tool) => tool.name === 'send_proxy_item_to_echo'), false);
+
+    const response = await mcpToolCall(app, 'anonymize_http', {
+      message:
+        'GET /users/alice@example.com HTTP/1.1\r\nHost: private.example.com\r\nCookie: SID=abcdef\r\nAuthorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturevalue\r\n\r\n',
+    });
+    const text = response.result.structuredContent.message;
+    assert.equal(text.includes('private.example.com'), false);
+    assert.equal(text.includes('abcdef'), false);
+    assert.equal(text.includes('signaturevalue'), false);
+    assert.equal(text.includes('app-1.example.invalid'), true);
+    assert.equal(text.includes('cookie-value-1'), true);
+    assert.equal(response.result.structuredContent.rawTrafficReturned, undefined);
+  } finally {
+    await app.stop();
+  }
+});
+
+test('MCP history and secrets tools never return raw target data', async () => {
+  const origin = await createOriginServer();
+  const app = createApp({
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+      mcp: {
+        enabled: true,
+        port: 0,
+        token: 'test-token',
+      },
+    },
+  });
+
+  await app.start();
+
+  try {
+    const secret = app.mcp.secretVault.add({
+      name: 'auth_token',
+      value: 'super-secret-token',
+      description: 'Session token for authenticated checks.',
+    });
+    const target = `http://127.0.0.1:${origin.port}/login?email=alice@example.com&token=super-secret-token`;
+    const response = await proxyRequest(app.proxy.port, {
+      method: 'POST',
+      path: target,
+      headers: {
+        host: `127.0.0.1:${origin.port}`,
+        'content-type': 'text/plain',
+        authorization: 'Bearer super-secret-token',
+      },
+      body: 'password=super-secret-token',
+    });
+    assert.equal(response.statusCode, 200);
+
+    const secrets = await mcpToolCall(app, 'list_secrets');
+    assert.equal(secrets.result.structuredContent.secrets[0].alias, secret.alias);
+    assert.equal(JSON.stringify(secrets).includes('super-secret-token'), false);
+
+    const history = await mcpToolCall(app, 'list_proxy_history', { limit: 10 });
+    const historyText = JSON.stringify(history);
+    assert.equal(historyText.includes('127.0.0.1'), false);
+    assert.equal(historyText.includes('alice@example.com'), false);
+    assert.equal(historyText.includes('super-secret-token'), false);
+    assert.equal(historyText.includes('app-'), true);
+
+    const id = history.result.structuredContent.items[0].id;
+    const item = await mcpToolCall(app, 'get_proxy_item', { id });
+    const itemText = JSON.stringify(item);
+    assert.equal(itemText.includes('127.0.0.1'), false);
+    assert.equal(itemText.includes('alice@example.com'), false);
+    assert.equal(itemText.includes('super-secret-token'), false);
+    assert.equal(itemText.includes(secret.alias) || itemText.includes(encodeURIComponent(secret.alias)), true);
+    assert.equal(item.result.structuredContent.rawRequestReturned, false);
+    assert.equal(item.result.structuredContent.rawResponseReturned, false);
+  } finally {
+    await app.stop();
+    await origin.close();
+  }
+});
+
+test('MCP active tool resolves secret aliases locally before sending modified request', async () => {
+  const origin = await createOriginServer();
+  const app = createApp({
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+      mcp: {
+        enabled: true,
+        port: 0,
+        token: 'test-token',
+        activeTesting: true,
+      },
+    },
+  });
+
+  await app.start();
+
+  try {
+    const secret = app.mcp.secretVault.add({
+      name: 'api_key',
+      value: 'real-api-key-1234567890',
+      description: 'API key used by active checks.',
+    });
+    const target = `http://127.0.0.1:${origin.port}/echo`;
+    const response = await proxyRequest(app.proxy.port, {
+      method: 'GET',
+      path: target,
+      headers: {
+        host: `127.0.0.1:${origin.port}`,
+      },
+    });
+    assert.equal(response.statusCode, 200);
+
+    const sourceId = app.proxy.listHistory()[0].id;
+    const sent = await mcpToolCall(app, 'send_modified_proxy_item', {
+      id: sourceId,
+      method: 'POST',
+      headers: {
+        'content-type': 'text/plain',
+      },
+      body: `apiKey=${secret.alias}`,
+    });
+    const sentText = JSON.stringify(sent);
+    assert.equal(sent.result.structuredContent.sent, true);
+    assert.equal(sent.result.structuredContent.secretAliasesUsed.includes(secret.alias), true);
+    assert.equal(sentText.includes('real-api-key-1234567890'), false);
+    assert.equal(sentText.includes(secret.alias), true);
+    assert.equal(sent.result.structuredContent.rawRequestReturned, false);
+    assert.equal(sent.result.structuredContent.rawResponseReturned, false);
+  } finally {
+    await app.stop();
+    await origin.close();
+  }
+});
+
+test('MCP run_payload_attack sends payload variants and returns anonymized results', async () => {
+  const origin = await createOriginServer();
+  const app = createApp({
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+      mcp: {
+        enabled: true,
+        port: 0,
+        token: 'test-token',
+        activeTesting: true,
+      },
+    },
+  });
+
+  await app.start();
+
+  try {
+    const secret = app.mcp.secretVault.add({
+      name: 'attack_token',
+      value: 'attack-secret-1234567890',
+      description: 'Secret payload value for attack checks.',
+    });
+    const target = `http://127.0.0.1:${origin.port}/search?q=seed`;
+    const sourceResponse = await proxyRequest(app.proxy.port, {
+      method: 'GET',
+      path: target,
+      headers: {
+        host: `127.0.0.1:${origin.port}`,
+      },
+    });
+    assert.equal(sourceResponse.statusCode, 200);
+
+    const listed = await mcpRpc(app, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/list',
+      params: {},
+    });
+    assert.equal(listed.result.tools.some((tool) => tool.name === 'run_payload_attack'), true);
+
+    const sourceId = app.proxy.listHistory()[0].id;
+    const attack = await mcpToolCall(app, 'run_payload_attack', {
+      id: sourceId,
+      insertionPoint: {
+        type: 'query',
+        name: 'q',
+      },
+      payloads: ['baseline', 'VEILCANARY-attack', secret.alias],
+      includeDetails: true,
+      detailLimit: 3,
+    });
+    const structured = attack.result.structuredContent;
+    const serialized = JSON.stringify(attack);
+
+    assert.equal(structured.executed, 3);
+    assert.equal(structured.payloadCount, 3);
+    assert.equal(structured.results.length, 3);
+    assert.equal(structured.reflectedCount, 3);
+    assert.equal(structured.secretAliasesUsed.includes(secret.alias), true);
+    assert.equal(structured.rawRequestReturned, false);
+    assert.equal(structured.rawResponseReturned, false);
+    assert.equal(structured.details.length > 0, true);
+    assert.equal(serialized.includes('attack-secret-1234567890'), false);
+    assert.equal(serialized.includes(`127.0.0.1:${origin.port}`), false);
+    assert.equal(serialized.includes(secret.alias), true);
+  } finally {
+    await app.stop();
+    await origin.close();
+  }
+});
+
+test('MCP sends captured requests to Echo without returning raw traffic', async () => {
+  const origin = await createOriginServer();
+  const app = createApp({
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+      mcp: {
+        enabled: true,
+        port: 0,
+        token: 'test-token',
+        activeTesting: true,
+      },
+    },
+  });
+
+  await app.start();
+
+  try {
+    const target = `http://127.0.0.1:${origin.port}/login?email=alice@example.com`;
+    const response = await proxyRequest(app.proxy.port, {
+      method: 'POST',
+      path: target,
+      headers: {
+        host: `127.0.0.1:${origin.port}`,
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      body: 'password=secret-value',
+    });
+    assert.equal(response.statusCode, 200);
+
+    const listed = await mcpRpc(app, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/list',
+      params: {},
+    });
+    assert.equal(listed.result.tools.some((tool) => tool.name === 'send_proxy_item_to_echo'), true);
+    assert.equal(listed.result.tools.some((tool) => tool.name === 'send_random_proxy_item_to_echo'), true);
+
+    const sourceId = app.proxy.listHistory()[0].id;
+    const sent = await mcpToolCall(app, 'send_proxy_item_to_echo', {
+      id: sourceId,
+      tabName: 'Login replay',
+      groupName: 'Auth checks',
+      color: 'pink',
+      groupColor: 'cyan',
+    });
+    const serialized = JSON.stringify(sent);
+    const structured = sent.result.structuredContent;
+    assert.equal(structured.sentToEcho, true);
+    assert.equal(structured.rawRequestReturned, false);
+    assert.equal(structured.rawResponseReturned, false);
+    assert.equal(serialized.includes(`127.0.0.1:${origin.port}`), false);
+    assert.equal(serialized.includes('alice@example.com'), false);
+    assert.equal(serialized.includes('secret-value'), false);
+
+    const ui = app.api.getUiState();
+    const group = ui.echo.groups.find((item) => item.title === 'Auth checks');
+    assert.ok(group);
+    assert.equal(group.color, 'cyan');
+    const tab = ui.echo.tabs.find((item) => item.id === structured.echoTabId);
+    assert.ok(tab);
+    assert.equal(tab.title, 'Login replay');
+    assert.equal(tab.groupId, group.id);
+    assert.equal(tab.color, 'pink');
+    assert.equal(tab.rawRequest.toLowerCase().includes(`host: 127.0.0.1:${origin.port}`), true);
+    assert.equal(tab.rawRequest.includes('alice@example.com'), true);
+
+    const random = await mcpToolCall(app, 'send_random_proxy_item_to_repeater', {
+      limit: 10,
+      repeaterGroup: 'Auth checks',
+      tabName: 'Random replay',
+    });
+    assert.equal(random.result.structuredContent.sentToEcho, true);
+    assert.equal(app.api.getUiState().echo.tabs.length, 2);
+  } finally {
+    await app.stop();
+    await origin.close();
+  }
+});
+
+test('MCP reports local findings without returning raw evidence', async () => {
+  const origin = await createOriginServer();
+  const app = createApp({
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+      mcp: {
+        enabled: true,
+        port: 0,
+        token: 'test-token',
+        activeTesting: true,
+      },
+    },
+  });
+
+  await app.start();
+
+  try {
+    const secretValue = 'finding-secret-token-1234567890';
+    const secret = app.mcp.secretVault.add({
+      name: 'finding_token',
+      value: secretValue,
+      description: 'Finding verification token.',
+    });
+    const target = `http://127.0.0.1:${origin.port}/account?email=alice@example.com`;
+    const response = await proxyRequest(app.proxy.port, {
+      method: 'GET',
+      path: target,
+      headers: {
+        host: `127.0.0.1:${origin.port}`,
+      },
+    });
+    assert.equal(response.statusCode, 200);
+
+    const sourceId = app.proxy.listHistory()[0].id;
+    const reported = await mcpToolCall(app, 'report_proxy_item_issue', {
+      id: sourceId,
+      name: 'Account token exposure for alice@example.com',
+      detail: `Observed token ${secretValue} on http://127.0.0.1:${origin.port}/account`,
+      remediation: 'Move the token to a server-side session.',
+      severity: 'medium',
+      confidence: 'firm',
+      category: 'Access Control',
+    });
+    const reportedText = JSON.stringify(reported);
+    assert.equal(reported.result.structuredContent.reported, true);
+    assert.equal(reported.result.structuredContent.rawRequestReturned, false);
+    assert.equal(reported.result.structuredContent.rawResponseReturned, false);
+    assert.equal(reportedText.includes(`127.0.0.1:${origin.port}`), false);
+    assert.equal(reportedText.includes('alice@example.com'), false);
+    assert.equal(reportedText.includes(secretValue), false);
+
+    const sent = await mcpToolCall(app, 'send_modified_proxy_item', {
+      id: sourceId,
+      method: 'POST',
+      headers: { 'content-type': 'text/plain' },
+      body: `token=${secret.alias}`,
+    });
+    assert.equal(sent.result.structuredContent.sent, true);
+
+    const sentReported = await mcpToolCall(app, 'report_sent_traffic_issue', {
+      id: sourceId,
+      name: 'Modified evidence issue',
+      detail: `Response reflected ${secretValue}`,
+      severity: 'high',
+      category: 'Evidence',
+    });
+    assert.equal(sentReported.result.structuredContent.evidenceSource, 'sent_traffic');
+    assert.equal(JSON.stringify(sentReported).includes(secretValue), false);
+
+    const modifiedReported = await mcpToolCall(app, 'report_modified_proxy_item_issue', {
+      id: sourceId,
+      name: 'One-call modified finding',
+      detail: `Payload ${secretValue} confirms behavior`,
+      method: 'POST',
+      headers: { 'content-type': 'text/plain' },
+      body: `token=${secret.alias}`,
+      severity: 'low',
+      createEchoTab: true,
+      groupName: 'Reported evidence',
+    });
+    assert.equal(modifiedReported.result.structuredContent.evidenceSource, 'modified_request');
+    assert.equal(modifiedReported.result.structuredContent.secretAliasesUsed.includes(secret.alias), true);
+    assert.equal(JSON.stringify(modifiedReported).includes(secretValue), false);
+    assert.equal(app.api.getUiState().echo.groups.some((group) => group.title === 'Reported evidence'), true);
+
+    const listed = await mcpToolCall(app, 'list_reported_findings', { limit: 10 });
+    assert.equal(listed.result.structuredContent.count, 3);
+    assert.equal(JSON.stringify(listed).includes(secretValue), false);
+    assert.equal(JSON.stringify(listed).includes('alice@example.com'), false);
+
+    const findings = await apiRequest(app.api.port, '/api/findings');
+    assert.equal(findings.filter((finding) => finding.source === 'mcp').length, 3);
+    assert.equal(findings.some((finding) => finding.title === 'Account token exposure for alice@example.com'), true);
+  } finally {
+    await app.stop();
+    await origin.close();
+  }
+});
+
 test('builds and exports project reports', async () => {
   const origin = await createOriginServer();
   const app = createApp({
@@ -1422,6 +1874,54 @@ function apiTextRequest(apiPort, urlPath, method = 'GET', body = null) {
     if (payload.length > 0) {
       req.write(payload);
     }
+    req.end();
+  });
+}
+
+function mcpToolCall(app, name, args = {}) {
+  return mcpRpc(app, {
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'tools/call',
+    params: {
+      name,
+      arguments: args,
+    },
+  });
+}
+
+function mcpRpc(app, body) {
+  const mcp = app.mcp.state();
+  return new Promise((resolve, reject) => {
+    const payload = Buffer.from(JSON.stringify(body));
+    const req = http.request(
+      {
+        host: '127.0.0.1',
+        port: mcp.port,
+        method: 'POST',
+        path: '/mcp',
+        headers: {
+          authorization: `Bearer ${mcp.token}`,
+          'content-type': 'application/json',
+          'content-length': payload.length,
+        },
+      },
+      (res) => {
+        const chunks = [];
+        res.on('data', (chunk) => chunks.push(chunk));
+        res.on('end', () => {
+          const text = Buffer.concat(chunks).toString('utf8');
+          if (res.statusCode < 200 || res.statusCode >= 300) {
+            reject(new Error(text || `HTTP ${res.statusCode}`));
+            return;
+          }
+          resolve(text ? JSON.parse(text) : null);
+        });
+      },
+    );
+
+    req.on('error', reject);
+    req.write(payload);
     req.end();
   });
 }

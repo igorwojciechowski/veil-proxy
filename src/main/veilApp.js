@@ -1,5 +1,6 @@
 const path = require('path');
 const { ApiServer } = require('./apiServer');
+const { McpServer } = require('./mcp/mcpServer');
 const { ProxyServer } = require('./proxyServer');
 const { defaultConfig } = require('./config');
 const { ProjectStore } = require('./projectStore');
@@ -11,10 +12,15 @@ function createApp(options = {}) {
   const history = store ? store.loadHistory(config.historyLimit) : [];
 
   const proxy = new ProxyServer(config, { store, history });
+  const mcp = new McpServer({
+    proxy,
+    configProvider: () => proxy.getConfig(),
+  });
   const publicDir = options.publicDir || path.resolve(__dirname, '../../public');
   const api = new ApiServer({
     config,
     proxy,
+    mcp,
     store,
     publicDir,
     port: options.apiPort || config.apiPort,
@@ -24,13 +30,15 @@ function createApp(options = {}) {
     config,
     proxy,
     api,
+    mcp,
     async start() {
       await proxy.start();
       await api.start();
+      await mcp.start();
       return this.state();
     },
     async stop() {
-      await Promise.allSettled([api.stop(), proxy.stop()]);
+      await Promise.allSettled([mcp.stop(), api.stop(), proxy.stop()]);
       if (store && ownsStore) {
         store.close();
       }
@@ -40,6 +48,7 @@ function createApp(options = {}) {
         apiPort: api.port,
         proxyPort: proxy.port,
         config: proxy.getConfig(),
+        mcp: mcp.state(),
         project: store ? store.info() : null,
         ui: api.getUiState(),
       };
@@ -57,7 +66,7 @@ function mergeConfig(base, override) {
     ...clone(override),
   };
 
-  for (const key of ['upstream', 'intercept', 'scope', 'https']) {
+  for (const key of ['upstream', 'intercept', 'scope', 'https', 'mcp']) {
     next[key] = {
       ...(base && base[key] ? clone(base[key]) : {}),
       ...(override && override[key] ? clone(override[key]) : {}),

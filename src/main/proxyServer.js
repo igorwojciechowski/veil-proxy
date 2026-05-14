@@ -24,6 +24,7 @@ class ProxyServer extends EventEmitter {
     this.pending = new Map();
     this.pendingCounter = 1;
     this.flowCounter = nextFlowCounter(this.history);
+    this.reportedFindings = sanitizeReportedFindings(options.reportedFindings || (this.store && this.store.getFindings ? this.store.getFindings() : []));
     this.port = this.config.proxyPort;
     this.certAuthority = new CertificateAuthority(this.config.https && this.config.https.certDir);
     this.mitmTargets = new WeakMap();
@@ -62,6 +63,7 @@ class ProxyServer extends EventEmitter {
     const intercept = nextConfig.intercept || {};
     const scope = nextConfig.scope || {};
     const https = nextConfig.https || {};
+    const mcp = nextConfig.mcp || {};
     const nextHost = Object.prototype.hasOwnProperty.call(nextConfig, 'proxyHost')
       ? normalizeProxyHost(nextConfig.proxyHost)
       : this.config.proxyHost;
@@ -97,6 +99,14 @@ class ProxyServer extends EventEmitter {
         ...this.config.https,
         ...https,
       },
+      mcp: sanitizeMcp(
+        Object.prototype.hasOwnProperty.call(nextConfig, 'mcp')
+          ? {
+              ...this.config.mcp,
+              ...mcp,
+            }
+          : this.config.mcp,
+      ),
       upstreams: Object.prototype.hasOwnProperty.call(nextConfig, 'upstreams')
         ? sanitizeUpstreams(nextConfig.upstreams)
         : this.config.upstreams || [],
@@ -166,16 +176,54 @@ class ProxyServer extends EventEmitter {
   }
 
   getFindings() {
-    return buildFindings(this.history);
+    return sortFindings([...this.reportedFindings, ...buildFindings(this.history)]);
+  }
+
+  getReportedFindings() {
+    return structuredClone(this.reportedFindings);
+  }
+
+  addReportedFinding(input = {}, flow = null) {
+    const finding = buildReportedFinding(input, flow);
+    const existingIndex = this.reportedFindings.findIndex((item) => item.id === finding.id);
+    if (existingIndex >= 0) {
+      const existing = this.reportedFindings[existingIndex];
+      finding.count = Number(existing.count || 1) + 1;
+      finding.flowIds = uniqueStrings([...(existing.flowIds || []), ...(finding.flowIds || [])]);
+      finding.evidence = uniqueStrings([...(existing.evidence || []), ...(finding.evidence || [])]).slice(0, 12);
+      finding.firstSeenAt = Math.min(Number(existing.firstSeenAt || finding.firstSeenAt), Number(finding.firstSeenAt));
+      this.reportedFindings[existingIndex] = finding;
+    } else {
+      this.reportedFindings.unshift(finding);
+    }
+    this.reportedFindings = sortFindings(this.reportedFindings).slice(0, 500);
+    this.persistReportedFindings();
+    this.emit('findings', this.getFindings());
+    return structuredClone(finding);
+  }
+
+  replaceReportedFindings(findings = []) {
+    this.reportedFindings = sanitizeReportedFindings(findings).slice(0, 500);
+    this.persistReportedFindings();
+    this.emit('findings', this.getFindings());
+    return this.getReportedFindings();
+  }
+
+  persistReportedFindings() {
+    if (this.store && this.store.setFindings) {
+      this.store.setFindings(this.reportedFindings);
+    }
   }
 
   replaceHistory(history, options = {}) {
     const nextHistory = Array.isArray(history) ? structuredClone(history).filter((flow) => flow && flow.id && flow.request) : [];
     this.history = nextHistory.slice(0, this.config.historyLimit);
     this.flowCounter = nextFlowCounter(this.history);
+    this.reportedFindings = [];
 
     if (options.persist !== false && this.store) {
       this.store.clearHistory();
+      this.persistReportedFindings();
       for (const flow of this.history) {
         this.store.upsertFlow(flow);
       }
@@ -188,9 +236,12 @@ class ProxyServer extends EventEmitter {
   clearHistory() {
     this.history = [];
     this.flowCounter = 1;
+    this.reportedFindings = [];
     if (this.store) {
       this.store.clearHistory();
+      this.persistReportedFindings();
     }
+    this.emit('findings', this.getFindings());
     return this.listHistory();
   }
 
@@ -1117,6 +1168,26 @@ function sanitizeScopeRules(rules) {
   });
 }
 
+function sanitizeMcp(mcp) {
+  const raw = mcp && typeof mcp === 'object' ? mcp : {};
+  return {
+    enabled: raw.enabled === true,
+    host: ['127.0.0.1', 'localhost', '::1'].includes(String(raw.host || '127.0.0.1')) ? String(raw.host || '127.0.0.1') : '127.0.0.1',
+    port: normalizeMcpPort(raw.port),
+    token: String(raw.token || '').slice(0, 512),
+    requireScope: raw.requireScope === true,
+    activeTesting: raw.activeTesting === true,
+  };
+}
+
+function normalizeMcpPort(value) {
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    return 8765;
+  }
+  return port;
+}
+
 function matchesScope(scope, flow) {
   const normalized = sanitizeScope(scope);
   if (!normalized.enabled) {
@@ -1505,6 +1576,103 @@ function applyResponseModification(flow, decision) {
     headers['content-length'] = String(Buffer.byteLength(flow.response.bodyBase64, 'base64'));
     flow.response.headers = headers;
   }
+}
+
+function buildReportedFinding(input, flow) {
+  const now = Date.now();
+  const parts = safeUrlParts(input.url || flow?.request?.url || '');
+  const sourceId = String(input.sourceId || flow?.id || '');
+  const title = trimText(input.title || input.name || 'Reported issue', 160) || 'Reported issue';
+  const detail = trimText(input.detail || input.description || '', 4000);
+  const remediation = trimText(input.remediation || '', 2000);
+  const evidence = uniqueStrings([
+    ...(Array.isArray(input.evidence) ? input.evidence : [input.evidence]),
+    detail,
+    remediation ? `Remediation: ${remediation}` : '',
+  ]).filter(Boolean);
+
+  return {
+    id: trimText(input.id, 240) || `mcp:${sourceId || 'sent'}:${slug(title)}:${now}`,
+    source: 'mcp',
+    evidenceSource: input.evidenceSource || 'proxy_history',
+    reporter: trimText(input.reporter || 'Codex', 80),
+    category: trimText(input.category || '', 80),
+    confidence: normalizeConfidence(input.confidence),
+    severity: normalizeSeverity(input.severity),
+    title,
+    description: detail || title,
+    remediation,
+    host: parts.host,
+    path: parts.path || '/',
+    url: parts.url,
+    method: trimText(input.method || flow?.request?.method || '', 24).toUpperCase(),
+    statusCode: input.statusCode == null ? flow?.response?.statusCode || null : Number(input.statusCode),
+    count: 1,
+    flowIds: sourceId ? [sourceId] : [],
+    evidence: evidence.slice(0, 12),
+    firstSeenAt: Number(input.firstSeenAt || flow?.startedAt || now),
+    lastSeenAt: Number(input.lastSeenAt || now),
+    mcpReportedAt: input.mcpReportedAt || new Date(now).toISOString(),
+    sentTrafficId: input.sentTrafficId ? String(input.sentTrafficId) : '',
+  };
+}
+
+function sanitizeReportedFindings(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => buildReportedFinding(item, null))
+    .filter((item) => item.id)
+    .slice(0, 500);
+}
+
+function sortFindings(findings) {
+  return [...findings].sort((a, b) => {
+    const severityDelta = severityWeight(b.severity) - severityWeight(a.severity);
+    if (severityDelta !== 0) return severityDelta;
+    return Number(b.lastSeenAt || 0) - Number(a.lastSeenAt || 0);
+  });
+}
+
+function severityWeight(severity) {
+  if (severity === 'high') return 4;
+  if (severity === 'medium') return 3;
+  if (severity === 'low') return 2;
+  return 1;
+}
+
+function normalizeSeverity(value) {
+  const severity = String(value || 'high').trim().toLowerCase();
+  if (severity === 'info') return 'information';
+  return ['high', 'medium', 'low', 'information'].includes(severity) ? severity : 'high';
+}
+
+function normalizeConfidence(value) {
+  const confidence = String(value || 'firm').trim().toLowerCase();
+  return ['certain', 'firm', 'tentative'].includes(confidence) ? confidence : 'firm';
+}
+
+function uniqueStrings(values) {
+  const seen = new Set();
+  const result = [];
+  for (const value of values) {
+    const text = trimText(value, 4000);
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    result.push(text);
+  }
+  return result;
+}
+
+function slug(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80);
+}
+
+function trimText(value, maxLength) {
+  return String(value || '').trim().slice(0, maxLength);
 }
 
 function readBody(stream, maxBytes) {

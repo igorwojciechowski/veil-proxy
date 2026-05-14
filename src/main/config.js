@@ -23,6 +23,14 @@ const defaultConfig = {
     certDir: process.env.VEIL_CERT_DIR || path.join(os.tmpdir(), 'veil-proxy-certs'),
     ignoreUpstreamCertificateErrors: true,
   },
+  mcp: {
+    enabled: process.env.VEIL_MCP_ENABLED === '1',
+    host: '127.0.0.1',
+    port: Number(process.env.VEIL_MCP_PORT || 8765),
+    token: process.env.VEIL_MCP_TOKEN || '',
+    requireScope: false,
+    activeTesting: false,
+  },
   upstream: {
     mode: 'direct',
     host: '',

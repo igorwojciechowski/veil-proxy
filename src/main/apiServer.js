@@ -4,9 +4,10 @@ const path = require('path');
 const { buildReport, renderMarkdownReport } = require('./report');
 
 class ApiServer {
-  constructor({ config, proxy, store, publicDir, port }) {
+  constructor({ config, proxy, mcp, store, publicDir, port }) {
     this.config = config;
     this.proxy = proxy;
+    this.mcp = mcp || null;
     this.store = store || null;
     this.publicDir = publicDir;
     this.port = port;
@@ -14,9 +15,31 @@ class ApiServer {
     this.memoryUiState = { echo: defaultEchoUiState(), traffic: defaultTrafficUiState() };
     this.server = http.createServer(this.handleRequest.bind(this));
 
+    if (this.mcp && typeof this.mcp.setUiStateAccess === 'function') {
+      this.mcp.setUiStateAccess({
+        read: () => this.getUiState(),
+        write: (nextUi = {}) => {
+          if (nextUi && Object.prototype.hasOwnProperty.call(nextUi, 'echo')) {
+            this.setUiState('echo', sanitizeEchoUiState(nextUi.echo));
+          }
+          if (nextUi && Object.prototype.hasOwnProperty.call(nextUi, 'traffic')) {
+            this.setUiState('traffic', sanitizeTrafficUiState(nextUi.traffic));
+          }
+          const uiState = this.getUiState();
+          this.broadcast('ui', {
+            ...uiState,
+            forceEcho: nextUi && Object.prototype.hasOwnProperty.call(nextUi, 'echo'),
+            forceTraffic: nextUi && Object.prototype.hasOwnProperty.call(nextUi, 'traffic'),
+          });
+          return uiState;
+        },
+      });
+    }
+
     this.proxy.on('history', (flow) => this.broadcast('history', flow));
     this.proxy.on('pending', (items) => this.broadcast('pending', items));
     this.proxy.on('config', (nextConfig) => this.broadcast('config', nextConfig));
+    this.proxy.on('findings', (findings) => this.broadcast('findings', findings));
   }
 
   start() {
@@ -61,7 +84,36 @@ class ApiServer {
 
       if (parsed.pathname === '/api/config' && req.method === 'PATCH') {
         const body = await readJson(req);
-        this.json(res, await this.proxy.updateConfig(body));
+        const nextConfig = await this.proxy.updateConfig(body);
+        if (this.mcp && Object.prototype.hasOwnProperty.call(body || {}, 'mcp')) {
+          await this.mcp.reconfigure();
+        }
+        this.json(res, nextConfig);
+        return;
+      }
+
+      if (parsed.pathname === '/api/mcp/secrets' && req.method === 'GET') {
+        this.json(res, this.mcp ? this.mcp.secretVault.list() : []);
+        return;
+      }
+
+      if (parsed.pathname === '/api/mcp/secrets' && req.method === 'POST') {
+        if (!this.mcp) {
+          this.notFound(res);
+          return;
+        }
+        const body = await readJson(req);
+        this.json(res, this.mcp.secretVault.add(body));
+        return;
+      }
+
+      const secretMatch = parsed.pathname.match(/^\/api\/mcp\/secrets\/([^/]+)$/);
+      if (secretMatch && req.method === 'DELETE') {
+        if (!this.mcp) {
+          this.notFound(res);
+          return;
+        }
+        this.json(res, { deleted: this.mcp.secretVault.remove(decodeURIComponent(secretMatch[1])) });
         return;
       }
 
@@ -129,6 +181,17 @@ class ApiServer {
 
       if (parsed.pathname === '/api/findings' && req.method === 'GET') {
         this.json(res, this.proxy.getFindings());
+        return;
+      }
+
+      if (parsed.pathname === '/api/search' && req.method === 'GET') {
+        this.json(
+          res,
+          searchRequests(this.proxy.history || [], parsed.searchParams.get('q') || parsed.searchParams.get('query') || '', {
+            limit: parsed.searchParams.get('limit'),
+            summarize: (flow) => this.proxy.summarizeFlow(flow),
+          }),
+        );
         return;
       }
 
@@ -216,6 +279,7 @@ class ApiServer {
       pending: this.proxy.listPending(),
       proxyPort: this.proxy.port,
       apiPort: this.port,
+      mcp: this.mcp ? this.mcp.state() : null,
       project: this.store ? this.store.info() : null,
       ui: this.getUiState(),
     };
@@ -254,10 +318,12 @@ class ApiServer {
           config: this.proxy.getConfig(),
           ui: this.getUiState(),
           history: this.proxy.history || [],
+          reportedFindings: this.proxy.getReportedFindings ? this.proxy.getReportedFindings() : [],
         };
     return {
       ...data,
       findings: this.proxy.getFindings(),
+      reportedFindings: this.proxy.getReportedFindings ? this.proxy.getReportedFindings() : data.reportedFindings || [],
     };
   }
 
@@ -271,7 +337,13 @@ class ApiServer {
     };
 
     await this.proxy.updateConfig(nextConfig);
+    if (this.mcp) {
+      await this.mcp.reconfigure();
+    }
     this.proxy.replaceHistory(data?.history || [], { persist: false });
+    if (this.proxy.replaceReportedFindings) {
+      this.proxy.replaceReportedFindings(data?.reportedFindings || reportedFindingsFromSnapshot(data?.findings));
+    }
 
     const nextUi = data?.ui && typeof data.ui === 'object' ? data.ui : {};
     this.memoryUiState = {
@@ -284,6 +356,7 @@ class ApiServer {
         config: this.proxy.getConfig(),
         ui: this.memoryUiState,
         history: this.proxy.history,
+        reportedFindings: this.proxy.getReportedFindings ? this.proxy.getReportedFindings() : [],
       });
     }
 
@@ -292,6 +365,9 @@ class ApiServer {
 
   async newProject() {
     this.proxy.replaceHistory([], { persist: false });
+    if (this.proxy.replaceReportedFindings) {
+      this.proxy.replaceReportedFindings([]);
+    }
     this.memoryUiState = {
       echo: defaultEchoUiState(),
       traffic: defaultTrafficUiState(),
@@ -302,6 +378,7 @@ class ApiServer {
         config: this.proxy.getConfig(),
         ui: this.memoryUiState,
         history: [],
+        reportedFindings: [],
       });
     }
 
@@ -423,6 +500,122 @@ function contentType(filePath) {
   if (ext === '.json') return 'application/json; charset=utf-8';
   if (ext === '.svg') return 'image/svg+xml';
   return 'application/octet-stream';
+}
+
+function searchRequests(history, query, options = {}) {
+  const terms = searchTerms(query);
+  const limit = clampNumber(options.limit, 1, 500, 100);
+  const summarize = typeof options.summarize === 'function' ? options.summarize : (flow) => flow;
+  const results = [];
+
+  if (terms.length === 0) {
+    return { query: String(query || ''), count: 0, results: [] };
+  }
+
+  for (const flow of Array.isArray(history) ? history : []) {
+    if (!flow || flow.type === 'connect' || flow.request?.method === 'CONNECT') {
+      continue;
+    }
+
+    const fields = requestSearchFields(flow);
+    const haystack = fields.map((field) => field.value).join('\n').toLowerCase();
+    if (!terms.every((term) => haystack.includes(term))) {
+      continue;
+    }
+
+    const matches = [];
+    for (const field of fields) {
+      const lower = field.value.toLowerCase();
+      if (!terms.some((term) => lower.includes(term))) {
+        continue;
+      }
+      matches.push({
+        area: field.area,
+        label: field.label,
+        preview: searchPreview(field.value, terms),
+      });
+      if (matches.length >= 8) break;
+    }
+
+    results.push({
+      request: summarize(flow),
+      matches,
+    });
+    if (results.length >= limit) {
+      break;
+    }
+  }
+
+  return {
+    query: String(query || ''),
+    count: results.length,
+    results,
+  };
+}
+
+function requestSearchFields(flow) {
+  const request = flow.request || {};
+  const response = flow.response || {};
+  const url = request.url || '';
+  const parsed = safeUrl(url);
+  const status = flow.error ? 'ERR' : response.statusCode ? `${response.statusCode} ${response.statusMessage || ''}` : '';
+  return [
+    { area: 'Meta', label: 'ID', value: String(flow.id || '') },
+    { area: 'Meta', label: 'Method', value: request.method || '' },
+    { area: 'Meta', label: 'URL', value: url },
+    { area: 'Meta', label: 'Host', value: parsed?.host || '' },
+    { area: 'Meta', label: 'Path', value: parsed ? `${parsed.pathname}${parsed.search}` : '' },
+    { area: 'Meta', label: 'Status', value: status },
+    { area: 'Meta', label: 'Error', value: flow.error || '' },
+    { area: 'Meta', label: 'Notes', value: Array.isArray(flow.notes) ? flow.notes.join('\n') : '' },
+    { area: 'Request', label: 'Headers', value: headersToText(request.headers) },
+    { area: 'Request', label: 'Body', value: request.bodyText || '' },
+    { area: 'Response', label: 'Headers', value: headersToText(response.headers) },
+    { area: 'Response', label: 'Body', value: response.bodyText || '' },
+  ].filter((field) => field.value);
+}
+
+function searchTerms(query) {
+  return String(query || '')
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .map((term) => term.trim())
+    .filter(Boolean)
+    .slice(0, 12);
+}
+
+function headersToText(headers) {
+  return Object.entries(headers || {})
+    .map(([name, value]) => `${name}: ${Array.isArray(value) ? value.join(', ') : value}`)
+    .join('\n');
+}
+
+function searchPreview(value, terms) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  const lower = text.toLowerCase();
+  const firstIndex = terms.reduce((best, term) => {
+    const index = lower.indexOf(term);
+    return index === -1 ? best : Math.min(best, index);
+  }, Number.POSITIVE_INFINITY);
+  const center = Number.isFinite(firstIndex) ? firstIndex : 0;
+  const start = Math.max(0, center - 80);
+  const end = Math.min(text.length, center + 160);
+  return `${start > 0 ? '...' : ''}${text.slice(start, end)}${end < text.length ? '...' : ''}`;
+}
+
+function reportedFindingsFromSnapshot(findings) {
+  if (!Array.isArray(findings)) return [];
+  return findings.filter((finding) => finding && typeof finding === 'object' && finding.source === 'mcp');
+}
+
+function safeUrl(value) {
+  try {
+    return new URL(value);
+  } catch (_error) {
+    return null;
+  }
 }
 
 function projectExportName(store) {

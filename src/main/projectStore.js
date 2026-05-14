@@ -130,6 +130,15 @@ class ProjectStore {
     this.setJsonMeta(`ui:${name}`, value || {});
   }
 
+  getFindings() {
+    const value = this.getJsonMeta('reportedFindings', []);
+    return Array.isArray(value) ? value : [];
+  }
+
+  setFindings(findings) {
+    this.setJsonMeta('reportedFindings', Array.isArray(findings) ? findings : []);
+  }
+
   loadHistory(limit) {
     const safeLimit = normalizeLimit(limit);
     return this.statements.listFlows
@@ -146,6 +155,7 @@ class ProjectStore {
       config: this.getConfig() || {},
       ui: this.getAllUiState(),
       history: this.loadHistory(100000),
+      reportedFindings: this.getFindings(),
     };
   }
 
@@ -159,6 +169,7 @@ class ProjectStore {
       for (const [name, value] of Object.entries(normalized.ui || {})) {
         this.setUiState(name, value);
       }
+      this.setFindings(normalized.reportedFindings || []);
       for (const flow of normalized.history || []) {
         this.upsertFlow(flow);
       }
@@ -394,7 +405,22 @@ function normalizeProjectData(data) {
     config: raw.config && typeof raw.config === 'object' ? raw.config : {},
     ui: raw.ui && typeof raw.ui === 'object' ? raw.ui : {},
     history: Array.isArray(raw.history) ? raw.history.filter((flow) => flow && typeof flow === 'object' && flow.id && flow.request) : [],
+    reportedFindings: normalizeReportedFindings(raw.reportedFindings || raw.findings),
   };
+}
+
+function normalizeReportedFindings(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((finding) => finding && typeof finding === 'object' && (finding.source === 'mcp' || finding.reporter))
+    .map((finding) => ({
+      ...finding,
+      id: String(finding.id || ''),
+      source: finding.source || 'mcp',
+      flowIds: Array.isArray(finding.flowIds) ? finding.flowIds.map(String) : [],
+      evidence: Array.isArray(finding.evidence) ? finding.evidence.map(String) : [],
+    }))
+    .filter((finding) => finding.id);
 }
 
 module.exports = {

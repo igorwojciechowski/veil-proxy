@@ -5,10 +5,18 @@ if (new URLSearchParams(window.location.search).get('desktop') === '1') {
 const state = {
   config: null,
   project: null,
+  mcp: null,
   history: [],
   findings: [],
   pending: [],
   desktopProject: null,
+  projectDirty: false,
+  projectMetaSignature: '',
+  recentProjects: [],
+  projectCheckpoints: [],
+  recoveryDraftChecked: false,
+  recoveryDraftSaving: false,
+  recoveryDraftQueued: false,
   selectedFlowId: null,
   selectedFlow: null,
   selectedPendingId: null,
@@ -57,6 +65,10 @@ const state = {
   selectedSiteHost: null,
   siteMapSearch: '',
   siteMapInScopeOnly: false,
+  globalSearchQuery: '',
+  globalSearchResults: [],
+  globalSearchLoading: false,
+  globalSearchError: '',
   findingsSearch: '',
   findingsSeverity: '',
   echoTabs: [],
@@ -112,6 +124,11 @@ const el = {
   sitePathsSubtitle: document.querySelector('#sitePathsSubtitle'),
   sitePathsList: document.querySelector('#sitePathsList'),
   refreshSiteMapBtn: document.querySelector('#refreshSiteMapBtn'),
+  globalSearchInput: document.querySelector('#globalSearchInput'),
+  globalSearchBtn: document.querySelector('#globalSearchBtn'),
+  globalSearchClearBtn: document.querySelector('#globalSearchClearBtn'),
+  globalSearchStatus: document.querySelector('#globalSearchStatus'),
+  globalSearchResults: document.querySelector('#globalSearchResults'),
   findingsSubtitle: document.querySelector('#findingsSubtitle'),
   findingsSearch: document.querySelector('#findingsSearch'),
   findingsSeverityFilter: document.querySelector('#findingsSeverityFilter'),
@@ -190,6 +207,14 @@ const el = {
   proxyPort: document.querySelector('#proxyPort'),
   saveProxyBtn: document.querySelector('#saveProxyBtn'),
   proxySaveStatus: document.querySelector('#proxySaveStatus'),
+  mcpEnabledToggle: document.querySelector('#mcpEnabledToggle'),
+  mcpPort: document.querySelector('#mcpPort'),
+  mcpToken: document.querySelector('#mcpToken'),
+  mcpRequireScopeToggle: document.querySelector('#mcpRequireScopeToggle'),
+  mcpActiveTestingToggle: document.querySelector('#mcpActiveTestingToggle'),
+  saveMcpBtn: document.querySelector('#saveMcpBtn'),
+  mcpEndpoint: document.querySelector('#mcpEndpoint'),
+  mcpStatus: document.querySelector('#mcpStatus'),
   projectName: document.querySelector('#projectName'),
   projectPath: document.querySelector('#projectPath'),
   newProjectBtn: document.querySelector('#newProjectBtn'),
@@ -197,6 +222,10 @@ const el = {
   saveProjectAsBtn: document.querySelector('#saveProjectAsBtn'),
   importProjectBtn: document.querySelector('#importProjectBtn'),
   importProjectInput: document.querySelector('#importProjectInput'),
+  recentProjectsList: document.querySelector('#recentProjectsList'),
+  clearRecentProjectsBtn: document.querySelector('#clearRecentProjectsBtn'),
+  projectCheckpointsList: document.querySelector('#projectCheckpointsList'),
+  clearProjectCheckpointsBtn: document.querySelector('#clearProjectCheckpointsBtn'),
   clearHistoryBtn: document.querySelector('#clearHistoryBtn'),
   projectActionStatus: document.querySelector('#projectActionStatus'),
   scopeStatus: document.querySelector('#scopeStatus'),
@@ -224,8 +253,12 @@ const el = {
 
 let siteMapLoadTimer = null;
 let findingsLoadTimer = null;
+let globalSearchTimer = null;
 let echoPersistTimer = null;
+let recoveryDraftTimer = null;
 
+const GLOBAL_SEARCH_DELAY_MS = 280;
+const RECOVERY_DRAFT_DELAY_MS = 2500;
 const VIRTUAL_BUFFER_ROWS = 8;
 const TRAFFIC_ROW_HEIGHT = 42;
 const SITE_HOST_ROW_HEIGHT = 74;
@@ -264,17 +297,22 @@ const SCOPE_PRESETS = {
 window.addEventListener('pagehide', () => {
   flushEchoState();
   flushTrafficPresets();
+  flushRecoveryDraft();
 });
 
 async function init() {
   bindUi();
+  await hydrateDesktopProjectMeta();
   const payload = await api('/api/state');
   applyState(payload);
+  await maybeRestoreRecoveryDraft();
   await Promise.all([loadSiteMap(), loadFindings()]);
   openEvents();
 }
 
 function bindUi() {
+  bindDesktopProjectCommands();
+
   document.querySelectorAll('.nav-item').forEach((button) => {
     button.addEventListener('click', () => setView(button.dataset.view));
   });
@@ -378,6 +416,24 @@ function bindUi() {
   });
 
   el.refreshSiteMapBtn.addEventListener('click', () => loadSiteMap());
+  el.globalSearchInput.addEventListener('input', () => {
+    state.globalSearchQuery = el.globalSearchInput.value;
+    state.globalSearchError = '';
+    scheduleGlobalSearch();
+  });
+  el.globalSearchInput.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    runGlobalSearch();
+  });
+  el.globalSearchBtn.addEventListener('click', () => runGlobalSearch());
+  el.globalSearchClearBtn.addEventListener('click', clearGlobalSearch);
+  el.globalSearchResults.addEventListener('click', async (event) => {
+    const button = event.target.closest('[data-search-request-id]');
+    if (!button) return;
+    await loadFlow(button.dataset.searchRequestId);
+    setView('traffic');
+  });
   el.refreshFindingsBtn.addEventListener('click', () => loadFindings());
   el.findingsSearch.addEventListener('input', () => {
     state.findingsSearch = el.findingsSearch.value.trim().toLowerCase();
@@ -416,8 +472,8 @@ function bindUi() {
     patchConfig({ intercept: { responses: el.responseInterceptToggle.checked } });
   });
 
-  [el.proxyHost, el.proxyPort].forEach((input) => {
-    input.addEventListener('input', syncProxyDraftFromDom);
+  [el.proxyHost, el.proxyPort, el.mcpPort, el.mcpToken].forEach((input) => {
+    input?.addEventListener('input', syncProxyDraftFromDom);
   });
   el.saveConfigBtn.addEventListener('click', () => {
     syncProxyDraftFromDom();
@@ -474,6 +530,7 @@ function bindUi() {
   });
 
   el.saveProxyBtn.addEventListener('click', saveProxyConfig);
+  el.saveMcpBtn?.addEventListener('click', saveMcpConfig);
   el.newProjectBtn.addEventListener('click', newProject);
   el.exportProjectBtn.addEventListener('click', () => saveProject(false));
   el.saveProjectAsBtn.addEventListener('click', () => saveProject(true));
@@ -485,6 +542,8 @@ function bindUi() {
     el.importProjectInput.click();
   });
   el.importProjectInput.addEventListener('change', importSelectedProject);
+  el.clearRecentProjectsBtn?.addEventListener('click', clearRecentProjects);
+  el.clearProjectCheckpointsBtn?.addEventListener('click', clearProjectCheckpoints);
   el.clearHistoryBtn.addEventListener('click', clearHistory);
   el.addIncludeScopeRuleBtn.addEventListener('click', () => addScopeRule('include'));
   el.addExcludeScopeRuleBtn.addEventListener('click', () => addScopeRule('exclude'));
@@ -559,6 +618,11 @@ function openEvents() {
   events.addEventListener('state', (event) => applyState(JSON.parse(event.data), false, { renderConfig: !state.config }));
   events.addEventListener('ui', (event) => applyUiState(JSON.parse(event.data), false));
   events.addEventListener('history', (event) => upsertHistory(JSON.parse(event.data)));
+  events.addEventListener('findings', (event) => {
+    state.findings = JSON.parse(event.data);
+    renderMeta();
+    renderFindings();
+  });
   events.addEventListener('pending', (event) => {
     state.pending = JSON.parse(event.data);
     renderAll({ config: false });
@@ -575,6 +639,7 @@ function openEvents() {
 
 function applyState(payload, forceUi = false, options = {}) {
   state.config = payload.config;
+  state.mcp = payload.mcp || null;
   state.project = payload.project || null;
   state.history = payload.history || [];
   state.pending = payload.pending || [];
@@ -585,12 +650,15 @@ function applyState(payload, forceUi = false, options = {}) {
 }
 
 function applyUiState(ui, force = false) {
-  if (ui?.traffic && (!state.trafficPersistenceReady || force)) {
+  const forceTraffic = force || ui?.forceTraffic === true;
+  const forceEcho = force || ui?.forceEcho === true;
+
+  if (ui?.traffic && (!state.trafficPersistenceReady || forceTraffic)) {
     state.trafficPresets = sanitizeTrafficPresets(ui.traffic.presets);
     state.trafficPersistenceReady = true;
   }
 
-  if (!ui?.echo || (state.echoPersistenceReady && !force)) {
+  if (!ui?.echo || (state.echoPersistenceReady && !forceEcho)) {
     return;
   }
 
@@ -617,6 +685,10 @@ function upsertHistory(flow) {
   renderAll({ config: false });
   scheduleSiteMapLoad();
   scheduleFindingsLoad();
+  if (state.globalSearchQuery) {
+    scheduleGlobalSearch();
+  }
+  markProjectDirty();
 }
 
 function renderAll(options = {}) {
@@ -626,6 +698,7 @@ function renderAll(options = {}) {
   }
   renderTraffic();
   renderSiteMap();
+  renderGlobalSearch();
   renderFindings();
   renderEcho();
   renderPending();
@@ -662,6 +735,7 @@ function renderConfig(options = {}) {
   if (!editingSettings) {
     el.proxyHost.value = state.config.proxyHost;
     el.proxyPort.value = state.config.proxyPort;
+    renderMcpConfig();
     renderUpstreamRules();
     renderRewriteRules();
   }
@@ -673,9 +747,412 @@ function renderConfig(options = {}) {
 
 function renderProject() {
   if (!el.projectName || !el.projectPath) return;
+  const project = currentProjectDisplay();
+  el.projectName.textContent = `${state.projectDirty ? '● ' : ''}${project.name}`;
+  el.projectPath.textContent = project.path
+    ? `${project.path}${state.projectDirty ? ' · unsaved changes' : ''}`
+    : `Memory session - not saved yet${state.projectDirty ? ' · unsaved changes' : ''}`;
+  renderProjectCheckpoints();
+  updateProjectChrome(project);
+}
+
+async function hydrateDesktopProjectMeta() {
+  if (!window.veilDesktop?.getProjectMeta) {
+    renderRecentProjects();
+    renderProjectCheckpoints();
+    return;
+  }
+
+  try {
+    const meta = await window.veilDesktop.getProjectMeta();
+    if (meta?.path) {
+      state.desktopProject = { name: meta.name || 'Veil Proxy Project', path: meta.path };
+    }
+    state.projectDirty = Boolean(meta?.dirty);
+    state.projectMetaSignature = '';
+    await loadRecentProjects();
+    await loadProjectCheckpoints();
+    renderProject();
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+function bindDesktopProjectCommands() {
+  if (!window.veilDesktop?.onProjectCommand) {
+    return;
+  }
+
+  window.veilDesktop.onProjectCommand((command) => {
+    handleProjectCommand(command).catch((error) => {
+      el.projectActionStatus.textContent = `Project command failed: ${formatError(error)}`;
+      if (command?.closeAfter) {
+        reportProjectCommandResult({ action: command.action, closeAfter: true, saved: false });
+      }
+    });
+  });
+}
+
+async function handleProjectCommand(command = {}) {
+  if (command.action === 'save') {
+    await saveProject(Boolean(command.saveAs), { closeAfter: Boolean(command.closeAfter) });
+    return;
+  }
+  if (command.action === 'open') {
+    await openDesktopProject();
+    return;
+  }
+  if (command.action === 'openRecent') {
+    await openRecentDesktopProject(command.path);
+    return;
+  }
+  if (command.action === 'recentProjectsChanged') {
+    state.recentProjects = sanitizeRecentProjects(command.projects);
+    renderRecentProjects();
+    return;
+  }
+  if (command.action === 'discardAndClose') {
+    await clearRecoveryDraft({ silent: true });
+    reportProjectCommandResult({ action: 'discard', closeAfter: Boolean(command.closeAfter), discarded: true });
+    return;
+  }
+  if (command.action === 'new') {
+    await newProject();
+  }
+}
+
+function currentProjectDisplay() {
   const project = state.desktopProject || state.project || {};
-  el.projectName.textContent = project.name || 'Unsaved project';
-  el.projectPath.textContent = project.path || 'Memory session - not saved yet';
+  return {
+    name: project.name || 'Unsaved project',
+    path: project.path || '',
+  };
+}
+
+function markProjectDirty() {
+  setProjectDirty(true);
+}
+
+function setProjectDirty(dirty) {
+  const next = Boolean(dirty);
+  if (state.projectDirty === next) {
+    if (next) {
+      scheduleRecoveryDraft();
+    }
+    renderProject();
+    return;
+  }
+  state.projectDirty = next;
+  if (next) {
+    scheduleRecoveryDraft();
+  } else {
+    clearRecoveryDraft({ silent: true }).catch(console.error);
+  }
+  renderProject();
+}
+
+function updateProjectChrome(project = currentProjectDisplay()) {
+  const meta = {
+    dirty: Boolean(state.projectDirty),
+    name: project.name || 'Unsaved project',
+    path: project.path || '',
+  };
+  document.title = `${meta.dirty ? '● ' : ''}${meta.name} - Veil Proxy`;
+  const signature = JSON.stringify(meta);
+  if (signature === state.projectMetaSignature) {
+    return;
+  }
+  state.projectMetaSignature = signature;
+  window.veilDesktop?.setProjectMeta?.(meta).catch(console.error);
+}
+
+async function loadRecentProjects() {
+  if (!window.veilDesktop?.recentProjects) {
+    state.recentProjects = [];
+    renderRecentProjects();
+    return;
+  }
+
+  try {
+    state.recentProjects = sanitizeRecentProjects(await window.veilDesktop.recentProjects());
+    renderRecentProjects();
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+function sanitizeRecentProjects(projects) {
+  if (!Array.isArray(projects)) return [];
+  const seen = new Set();
+  return projects
+    .map((project) => ({
+      name: project?.name || basename(project?.path || ''),
+      path: project?.path || '',
+      lastOpened: Number(project?.lastOpened || 0) || 0,
+    }))
+    .filter((project) => {
+      if (!project.path || seen.has(project.path)) return false;
+      seen.add(project.path);
+      return true;
+    });
+}
+
+function renderRecentProjects() {
+  if (!el.recentProjectsList || !el.clearRecentProjectsBtn) {
+    return;
+  }
+
+  el.clearRecentProjectsBtn.disabled = state.recentProjects.length === 0;
+  el.recentProjectsList.innerHTML = state.recentProjects.length
+    ? state.recentProjects.map((project) => renderRecentProject(project)).join('')
+    : '<div class="recent-projects-empty">No recent projects</div>';
+
+  el.recentProjectsList.querySelectorAll('[data-open-recent-project]').forEach((button) => {
+    button.addEventListener('click', () => openRecentDesktopProject(button.dataset.openRecentProject));
+  });
+}
+
+function renderRecentProject(project) {
+  return `
+    <button class="recent-project-button" type="button" data-open-recent-project="${escapeHtml(project.path)}" title="${escapeHtml(project.path)}">
+      <span class="recent-project-name">${escapeHtml(project.name || basename(project.path))}</span>
+      <span class="recent-project-path">${escapeHtml(project.path)}</span>
+    </button>
+  `;
+}
+
+async function loadProjectCheckpoints() {
+  const project = currentProjectDisplay();
+  if (!project.path) {
+    state.projectCheckpoints = [];
+    renderProjectCheckpoints();
+    return;
+  }
+  if (!window.veilDesktop?.projectCheckpoints) {
+    state.projectCheckpoints = [];
+    renderProjectCheckpoints();
+    return;
+  }
+
+  try {
+    state.projectCheckpoints = sanitizeProjectCheckpoints(await window.veilDesktop.projectCheckpoints(project));
+    renderProjectCheckpoints();
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+function sanitizeProjectCheckpoints(checkpoints) {
+  if (!Array.isArray(checkpoints)) return [];
+  const seen = new Set();
+  return checkpoints
+    .map((checkpoint) => ({
+      id: checkpoint?.id || '',
+      createdAt: checkpoint?.createdAt || '',
+      name: checkpoint?.name || '',
+      size: Number(checkpoint?.size || 0) || 0,
+      project: {
+        name: checkpoint?.project?.name || 'Unsaved project',
+        path: checkpoint?.project?.path || '',
+      },
+    }))
+    .filter((checkpoint) => {
+      if (!checkpoint.id || seen.has(checkpoint.id)) return false;
+      seen.add(checkpoint.id);
+      return true;
+    });
+}
+
+function renderProjectCheckpoints() {
+  if (!el.projectCheckpointsList || !el.clearProjectCheckpointsBtn) {
+    return;
+  }
+
+  const project = currentProjectDisplay();
+  const hasProjectPath = Boolean(project.path);
+  el.clearProjectCheckpointsBtn.disabled = !hasProjectPath || state.projectCheckpoints.length === 0;
+  el.projectCheckpointsList.innerHTML = state.projectCheckpoints.length
+    ? state.projectCheckpoints.map((checkpoint) => renderProjectCheckpoint(checkpoint)).join('')
+    : `<div class="project-checkpoints-empty">${hasProjectPath ? 'No checkpoints yet' : 'Save the project to create checkpoints'}</div>`;
+
+  el.projectCheckpointsList.querySelectorAll('[data-restore-checkpoint]').forEach((button) => {
+    button.addEventListener('click', () => restoreProjectCheckpoint(button.dataset.restoreCheckpoint));
+  });
+}
+
+function renderProjectCheckpoint(checkpoint) {
+  const createdAt = checkpoint.createdAt ? formatDateTime(checkpoint.createdAt) : 'Unknown time';
+  const pathLabel = checkpoint.project.path || checkpoint.project.name || 'Unsaved project';
+  return `
+    <div class="project-checkpoint-row">
+      <div class="project-checkpoint-main" title="${escapeHtml(pathLabel)}">
+        <span class="project-checkpoint-name">${escapeHtml(createdAt)}</span>
+        <span class="project-checkpoint-path">${escapeHtml(pathLabel)}</span>
+      </div>
+      <button class="button ghost compact-button" type="button" data-restore-checkpoint="${escapeHtml(checkpoint.id)}">Restore</button>
+    </div>
+  `;
+}
+
+async function restoreProjectCheckpoint(checkpointId) {
+  if (!checkpointId || !window.veilDesktop?.openProjectCheckpoint) {
+    return false;
+  }
+  if (!confirmDiscardProjectChanges('restore this checkpoint')) {
+    return false;
+  }
+
+  el.projectActionStatus.textContent = 'Restoring checkpoint...';
+  try {
+    const checkpoint = await window.veilDesktop.openProjectCheckpoint(checkpointId);
+    const project = checkpoint.project || {};
+    state.projectCheckpoints = sanitizeProjectCheckpoints(checkpoint.checkpoints || state.projectCheckpoints);
+    await importProjectPayload(checkpoint.data, `${project.name || 'project'} checkpoint`, project.path ? { name: project.name, path: project.path } : null, {
+      dirty: true,
+      keepRecoveryDraft: true,
+      skipCheckpointLoad: true,
+    });
+    renderProjectCheckpoints();
+    el.projectActionStatus.textContent = `Restored checkpoint from ${formatDateTime(checkpoint.createdAt)}. Save to keep it.`;
+    return true;
+  } catch (error) {
+    el.projectActionStatus.textContent = `Restore failed: ${formatError(error)}`;
+    await loadProjectCheckpoints();
+    return false;
+  }
+}
+
+function basename(filePath) {
+  return String(filePath || '').split(/[\\/]/).filter(Boolean).pop() || 'Project';
+}
+
+function formatDateTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return String(value || '');
+  }
+  return date.toLocaleString();
+}
+
+async function maybeRestoreRecoveryDraft() {
+  if (state.recoveryDraftChecked || !window.veilDesktop?.recoveryDraft) {
+    return;
+  }
+  state.recoveryDraftChecked = true;
+  if (state.projectDirty) {
+    return;
+  }
+
+  let draft = null;
+  try {
+    draft = await window.veilDesktop.recoveryDraft();
+  } catch (error) {
+    console.error(error);
+    return;
+  }
+  if (!draft?.payload) {
+    return;
+  }
+
+  const project = draft.project || {};
+  const displayName = project.name || basename(project.path || '') || 'unsaved project';
+  const savedAt = draft.savedAt ? ` from ${formatDateTime(draft.savedAt)}` : '';
+  const shouldRestore = window.confirm(`Recover autosaved changes for ${displayName}${savedAt}?`);
+  if (!shouldRestore) {
+    await clearRecoveryDraft({ silent: true });
+    return;
+  }
+
+  await importProjectPayload(draft.payload, `${displayName} recovery`, project.path ? { name: displayName, path: project.path } : null, {
+    dirty: true,
+    keepRecoveryDraft: true,
+  });
+  el.projectActionStatus.textContent = `Recovered autosaved changes for ${displayName}.`;
+}
+
+function scheduleRecoveryDraft() {
+  if (!state.projectDirty || !window.veilDesktop?.saveRecoveryDraft) {
+    return;
+  }
+
+  clearTimeout(recoveryDraftTimer);
+  recoveryDraftTimer = setTimeout(() => {
+    recoveryDraftTimer = null;
+    saveRecoveryDraftNow().catch(console.error);
+  }, RECOVERY_DRAFT_DELAY_MS);
+}
+
+async function flushRecoveryDraft() {
+  clearTimeout(recoveryDraftTimer);
+  recoveryDraftTimer = null;
+  if (!state.projectDirty) {
+    return;
+  }
+  await saveRecoveryDraftNow();
+}
+
+async function saveRecoveryDraftNow() {
+  if (!state.projectDirty || !window.veilDesktop?.saveRecoveryDraft) {
+    return false;
+  }
+  if (state.recoveryDraftSaving) {
+    state.recoveryDraftQueued = true;
+    return false;
+  }
+
+  state.recoveryDraftSaving = true;
+  state.recoveryDraftQueued = false;
+  try {
+    await syncProjectUiState();
+    const payload = await api('/api/project/export');
+    if (!state.projectDirty) {
+      return false;
+    }
+    await window.veilDesktop.saveRecoveryDraft(payload, currentProjectDisplay());
+    if (!state.projectDirty) {
+      await clearRecoveryDraft({ silent: true });
+      return false;
+    }
+    return true;
+  } catch (error) {
+    console.error(error);
+    return false;
+  } finally {
+    state.recoveryDraftSaving = false;
+    if (state.recoveryDraftQueued && state.projectDirty) {
+      state.recoveryDraftQueued = false;
+      scheduleRecoveryDraft();
+    }
+  }
+}
+
+async function clearRecoveryDraft(options = {}) {
+  clearTimeout(recoveryDraftTimer);
+  recoveryDraftTimer = null;
+  state.recoveryDraftQueued = false;
+  if (!window.veilDesktop?.clearRecoveryDraft) {
+    return;
+  }
+
+  try {
+    await window.veilDesktop.clearRecoveryDraft();
+  } catch (error) {
+    if (!options.silent) {
+      el.projectActionStatus.textContent = `Could not clear recovery draft: ${formatError(error)}`;
+    }
+    console.error(error);
+  }
+}
+
+function reportProjectCommandResult(result) {
+  window.veilDesktop?.projectCommandResult?.(result).catch(console.error);
+}
+
+function confirmDiscardProjectChanges(actionLabel) {
+  if (!state.projectDirty) {
+    return true;
+  }
+  return window.confirm(`Discard unsaved project changes and ${actionLabel}?`);
 }
 
 function isActiveEditableIn(container) {
@@ -691,6 +1168,27 @@ function syncProxyDraftFromDom() {
   if (!state.config) return;
   state.config.proxyHost = el.proxyHost.value.trim();
   state.config.proxyPort = Number(el.proxyPort.value || 0);
+}
+
+function renderMcpConfig() {
+  if (!el.mcpEnabledToggle || !state.config) return;
+  const config = state.config.mcp || {};
+  const runtime = state.mcp || {};
+  el.mcpEnabledToggle.checked = config.enabled === true;
+  el.mcpPort.value = runtime.port || config.port || 8765;
+  el.mcpToken.value = runtime.token || config.token || '';
+  el.mcpRequireScopeToggle.checked = config.requireScope === true;
+  el.mcpActiveTestingToggle.checked = config.activeTesting === true;
+  if (runtime.running) {
+    el.mcpEndpoint.textContent = runtime.endpoint;
+    el.mcpStatus.textContent = `Running. Use Authorization: Bearer ${runtime.token}`;
+  } else if (config.enabled && runtime.lastError) {
+    el.mcpEndpoint.textContent = 'MCP failed to start';
+    el.mcpStatus.textContent = runtime.lastError;
+  } else {
+    el.mcpEndpoint.textContent = 'MCP disabled';
+    el.mcpStatus.textContent = 'MCP returns anonymized data only. Real secret values are never returned.';
+  }
 }
 
 function renderUpstreamRules() {
@@ -1388,7 +1886,7 @@ function closeEchoGroupListOnOutside(event) {
   if (!state.selectedEchoGroupId) return;
   if (event.target.closest('.echo-group-list, .echo-group-tab')) return;
   state.selectedEchoGroupId = null;
-  schedulePersistEchoState();
+  schedulePersistEchoState({ dirty: false });
   renderEcho();
 }
 
@@ -1579,6 +2077,142 @@ function renderVirtualSitePathItems(items) {
     window.top,
     'site-tree virtual-list-window',
   );
+}
+
+function scheduleGlobalSearch() {
+  clearTimeout(globalSearchTimer);
+  const query = state.globalSearchQuery.trim();
+  if (!query) {
+    state.globalSearchResults = [];
+    state.globalSearchLoading = false;
+    state.globalSearchError = '';
+    renderGlobalSearch();
+    return;
+  }
+  if (query.length < 2) {
+    renderGlobalSearch();
+    return;
+  }
+  globalSearchTimer = setTimeout(() => {
+    runGlobalSearch().catch(console.error);
+  }, GLOBAL_SEARCH_DELAY_MS);
+}
+
+async function runGlobalSearch() {
+  clearTimeout(globalSearchTimer);
+  const query = state.globalSearchQuery.trim();
+  if (!query) {
+    clearGlobalSearch();
+    return;
+  }
+
+  state.globalSearchLoading = true;
+  state.globalSearchError = '';
+  renderGlobalSearch();
+  try {
+    const result = await api(`/api/search?q=${encodeURIComponent(query)}&limit=200`);
+    if (query !== state.globalSearchQuery.trim()) {
+      return;
+    }
+    state.globalSearchResults = Array.isArray(result.results) ? result.results : [];
+  } catch (error) {
+    state.globalSearchResults = [];
+    state.globalSearchError = `Search failed: ${formatError(error)}`;
+    return;
+  } finally {
+    state.globalSearchLoading = false;
+    renderGlobalSearch();
+  }
+}
+
+function clearGlobalSearch() {
+  clearTimeout(globalSearchTimer);
+  state.globalSearchQuery = '';
+  state.globalSearchResults = [];
+  state.globalSearchLoading = false;
+  state.globalSearchError = '';
+  el.globalSearchInput.value = '';
+  renderGlobalSearch();
+}
+
+function renderGlobalSearch() {
+  if (!el.globalSearchResults || !el.globalSearchStatus) return;
+  if (el.globalSearchInput.value !== state.globalSearchQuery) {
+    el.globalSearchInput.value = state.globalSearchQuery;
+  }
+
+  const query = state.globalSearchQuery.trim();
+  if (!query) {
+    el.globalSearchStatus.textContent = 'Search across requests, responses, headers, bodies, and metadata';
+    el.globalSearchResults.innerHTML = '<div class="empty-state">Enter a query to search captured requests</div>';
+    return;
+  }
+  if (query.length < 2) {
+    el.globalSearchStatus.textContent = 'Type at least 2 characters';
+    el.globalSearchResults.innerHTML = '<div class="empty-state">Query is too short</div>';
+    return;
+  }
+  if (state.globalSearchError) {
+    el.globalSearchStatus.textContent = state.globalSearchError;
+    el.globalSearchResults.innerHTML = '<div class="empty-state">Search failed</div>';
+    return;
+  }
+  if (state.globalSearchLoading) {
+    el.globalSearchStatus.textContent = 'Searching...';
+  } else {
+    const count = state.globalSearchResults.length;
+    el.globalSearchStatus.textContent = `${count} ${count === 1 ? 'request' : 'requests'} found`;
+  }
+
+  el.globalSearchResults.innerHTML = state.globalSearchResults.length
+    ? state.globalSearchResults.map((result) => renderGlobalSearchResult(result, query)).join('')
+    : `<div class="empty-state">${state.globalSearchLoading ? 'Searching...' : 'No matching requests'}</div>`;
+}
+
+function renderGlobalSearchResult(result, query) {
+  const request = result.request || {};
+  const status = request.error ? 'ERR' : request.statusCode || '-';
+  const url = request.url || '';
+  const path = safeUrl(url)?.pathname || request.path || url || '/';
+  return `
+    <article class="global-search-result">
+      <button class="global-search-result-main" type="button" data-search-request-id="${escapeHtml(request.id || '')}">
+        <span class="flow-id-cell">#${escapeHtml(request.id || '')}</span>
+        <span class="method-pill">${escapeHtml(request.method || '-')}</span>
+        <span class="global-search-host" title="${escapeHtml(request.host || '')}">${escapeHtml(request.host || '')}</span>
+        <span class="global-search-path" title="${escapeHtml(url)}">${escapeHtml(path)}</span>
+        <span class="status-pill ${request.error ? 'error' : ''}">${escapeHtml(String(status))}</span>
+      </button>
+      <div class="global-search-matches">
+        ${(result.matches || []).map((match) => renderGlobalSearchMatch(match, query)).join('')}
+      </div>
+    </article>
+  `;
+}
+
+function renderGlobalSearchMatch(match, query) {
+  return `
+    <div class="global-search-match">
+      <span class="global-search-match-label">${escapeHtml(match.area || 'Match')} · ${escapeHtml(match.label || '')}</span>
+      <code>${highlightSearchText(match.preview || '', query)}</code>
+    </div>
+  `;
+}
+
+function highlightSearchText(text, query) {
+  const terms = String(query || '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 8)
+    .map(escapeRegExp);
+  if (terms.length === 0) return escapeHtml(text);
+  const pattern = new RegExp(`(${terms.join('|')})`, 'ig');
+  return escapeHtml(text).replace(pattern, '<mark>$1</mark>');
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function renderFindings() {
@@ -1924,7 +2558,7 @@ function renderEcho() {
     button.addEventListener('click', () => {
       syncSelectedEchoRequest();
       state.selectedEchoTabId = button.dataset.echoTabId;
-      schedulePersistEchoState();
+      schedulePersistEchoState({ dirty: false });
       renderEcho();
     });
     button.addEventListener('dblclick', (event) => {
@@ -1935,7 +2569,7 @@ function renderEcho() {
   el.echoTabs.querySelectorAll('[data-echo-group-id]').forEach((button) => {
     button.addEventListener('click', () => {
       state.selectedEchoGroupId = state.selectedEchoGroupId === button.dataset.echoGroupId ? null : button.dataset.echoGroupId;
-      schedulePersistEchoState();
+      schedulePersistEchoState({ dirty: false });
       renderEcho();
     });
     button.addEventListener('dblclick', (event) => {
@@ -2051,7 +2685,7 @@ function renderEchoGroupList() {
     button.addEventListener('click', () => {
       syncSelectedEchoRequest();
       state.selectedEchoTabId = button.dataset.echoTabId;
-      schedulePersistEchoState();
+      schedulePersistEchoState({ dirty: false });
       renderEcho();
     });
     button.addEventListener('dblclick', (event) => {
@@ -2322,7 +2956,7 @@ function startEchoPaneResize(event) {
   const onUp = () => {
     window.removeEventListener('mousemove', onMove);
     window.removeEventListener('mouseup', onUp);
-    schedulePersistEchoState();
+    schedulePersistEchoState({ dirty: false });
   };
 
   window.addEventListener('mousemove', onMove);
@@ -2358,7 +2992,7 @@ function createBlankEchoTab() {
 
 async function sendFlowToEcho(flowId) {
   const flow = state.selectedFlow?.id === flowId ? state.selectedFlow : await api(`/api/history/${encodeURIComponent(flowId)}`);
-  const tab = createEchoTab(flow.request, `${flow.request.method} ${requestTarget(flow.request.url)}`, `From flow ${flow.id}`);
+  const tab = createEchoTab(flow.request, `${flow.request.method} ${requestTarget(flow.request.url)}`, `From req #${flow.id}`);
   state.echoTabs.unshift(tab);
   state.selectedEchoTabId = tab.id;
   schedulePersistEchoState();
@@ -2413,11 +3047,14 @@ function serializeEchoState() {
   };
 }
 
-function schedulePersistEchoState() {
+function schedulePersistEchoState(options = {}) {
   if (!state.echoPersistenceReady) {
     return;
   }
 
+  if (options.dirty !== false) {
+    markProjectDirty();
+  }
   clearTimeout(echoPersistTimer);
   echoPersistTimer = setTimeout(() => {
     echoPersistTimer = null;
@@ -2457,6 +3094,7 @@ function flushEchoState() {
 
 async function persistTrafficPresets() {
   state.trafficPersistenceReady = true;
+  markProjectDirty();
   await api('/api/ui-state', {
     method: 'PATCH',
     headers: { 'content-type': 'application/json' },
@@ -2500,6 +3138,9 @@ function syncSelectedEchoRequest() {
     return;
   }
 
+  const previousRaw = tab.rawRequest || '';
+  const previousMethod = tab.method || '';
+  const previousTitle = tab.title || '';
   tab.rawRequest = el.echoRawRequest.value;
   const parsed = parseRawRequestMeta(tab.rawRequest);
   tab.method = parsed.method || 'GET';
@@ -2508,7 +3149,9 @@ function syncSelectedEchoRequest() {
     el.echoTabName.value = tab.title;
   }
   renderEchoRawRequest();
-  schedulePersistEchoState();
+  if (tab.rawRequest !== previousRaw || tab.method !== previousMethod || tab.title !== previousTitle) {
+    schedulePersistEchoState();
+  }
 }
 
 function syncSelectedEchoMeta() {
@@ -2764,7 +3407,7 @@ function showContextFlows() {
   closeContextMenu();
   if (flowIds.length === 0) return;
 
-  state.trafficSearch = `flow:${flowIds.join(',')}`;
+  state.trafficSearch = `req:${flowIds.join(',')}`;
   state.trafficFilters = {
     method: [],
     status: [],
@@ -2813,9 +3456,9 @@ function matchesTrafficSearch(flow) {
 
 function flowSearchIdSet(query) {
   const text = String(query || '').trim().toLowerCase();
-  if (!text.startsWith('flow:')) return null;
+  if (!text.startsWith('req:') && !text.startsWith('flow:')) return null;
   const ids = text
-    .slice(5)
+    .slice(text.indexOf(':') + 1)
     .split(/[,\s]+/)
     .map((item) => item.replace(/^#/, '').trim())
     .filter(Boolean);
@@ -3174,7 +3817,7 @@ function renderBody(container, message, context) {
   container.innerHTML = '';
 
   if (!message) {
-    container.appendChild(bodyNote('No message body', 'This flow has no message for this side yet.'));
+    container.appendChild(bodyNote('No message body', 'This request has no message for this side yet.'));
     return;
   }
 
@@ -3799,8 +4442,41 @@ async function saveProxyConfig() {
   }
 }
 
-async function saveProject(forceSaveAs = false) {
+async function saveMcpConfig() {
+  const port = Number(el.mcpPort.value);
+  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    el.mcpStatus.textContent = 'MCP port must be between 0 and 65535.';
+    return;
+  }
+
+  el.mcpStatus.textContent = 'Applying MCP settings...';
+  try {
+    await patchConfig({
+      mcp: {
+        ...(state.config.mcp || {}),
+        enabled: el.mcpEnabledToggle.checked,
+        host: '127.0.0.1',
+        port,
+        token: el.mcpToken.value.trim(),
+        requireScope: el.mcpRequireScopeToggle.checked,
+        activeTesting: el.mcpActiveTestingToggle.checked,
+      },
+    });
+    const payload = await api('/api/state');
+    applyState(payload, false, { renderConfig: true });
+    renderMcpConfig();
+    el.mcpStatus.textContent = state.mcp?.running
+      ? `Running. Use Authorization: Bearer ${state.mcp.token}`
+      : state.mcp?.lastError || 'MCP disabled.';
+  } catch (error) {
+    el.mcpStatus.textContent = `Could not apply MCP settings: ${formatError(error)}`;
+    renderConfig();
+  }
+}
+
+async function saveProject(forceSaveAs = false, options = {}) {
   el.projectActionStatus.textContent = forceSaveAs ? 'Preparing Save As...' : 'Saving project...';
+  let saved = false;
 
   try {
     await syncProjectUiState();
@@ -3813,12 +4489,18 @@ async function saveProject(forceSaveAs = false) {
         : window.veilDesktop.saveProject(payload, filename));
       if (result?.canceled) {
         el.projectActionStatus.textContent = 'Save cancelled.';
-        return;
+        return false;
       }
       state.desktopProject = { name: result.name, path: result.path };
-      renderProject();
+      state.recentProjects = sanitizeRecentProjects(result.recentProjects || state.recentProjects);
+      state.projectCheckpoints = sanitizeProjectCheckpoints(result.checkpoints || state.projectCheckpoints);
+      setProjectDirty(false);
+      await clearRecoveryDraft({ silent: true });
+      renderRecentProjects();
+      renderProjectCheckpoints();
       el.projectActionStatus.textContent = `Saved ${result.name}.`;
-      return;
+      saved = true;
+      return true;
     }
 
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
@@ -3830,29 +4512,72 @@ async function saveProject(forceSaveAs = false) {
     link.click();
     link.remove();
     URL.revokeObjectURL(url);
+    setProjectDirty(false);
+    await clearRecoveryDraft({ silent: true });
     el.projectActionStatus.textContent = `Saved ${filename}.`;
+    saved = true;
+    return true;
   } catch (error) {
     el.projectActionStatus.textContent = `Save failed: ${formatError(error)}`;
+    return false;
+  } finally {
+    if (options.closeAfter) {
+      reportProjectCommandResult({ action: 'save', closeAfter: true, saved });
+    }
   }
 }
 
 async function openDesktopProject() {
+  if (!confirmDiscardProjectChanges('open another project')) {
+    return false;
+  }
+
   el.projectActionStatus.textContent = 'Opening project...';
   try {
     const result = await window.veilDesktop.openProject();
     if (result?.canceled) {
       el.projectActionStatus.textContent = 'Open cancelled.';
-      return;
+      return false;
     }
+    state.recentProjects = sanitizeRecentProjects(result.recentProjects || state.recentProjects);
+    state.projectCheckpoints = sanitizeProjectCheckpoints(result.checkpoints || state.projectCheckpoints);
     await importProjectPayload(result.data, result.name, { name: result.name, path: result.path });
+    return true;
   } catch (error) {
     el.projectActionStatus.textContent = `Open failed: ${formatError(error)}`;
+    return false;
+  }
+}
+
+async function openRecentDesktopProject(filePath) {
+  if (!filePath || !window.veilDesktop?.openRecentProject) {
+    return false;
+  }
+  if (!confirmDiscardProjectChanges('open another project')) {
+    return false;
+  }
+
+  el.projectActionStatus.textContent = `Opening ${basename(filePath)}...`;
+  try {
+    const result = await window.veilDesktop.openRecentProject(filePath);
+    state.recentProjects = sanitizeRecentProjects(result.recentProjects || state.recentProjects);
+    state.projectCheckpoints = sanitizeProjectCheckpoints(result.checkpoints || state.projectCheckpoints);
+    await importProjectPayload(result.data, result.name, { name: result.name, path: result.path });
+    return true;
+  } catch (error) {
+    el.projectActionStatus.textContent = `Open failed: ${formatError(error)}`;
+    await loadRecentProjects();
+    return false;
   }
 }
 
 async function importSelectedProject() {
   const file = el.importProjectInput.files?.[0];
   if (!file) return;
+  if (!confirmDiscardProjectChanges('open another project')) {
+    el.importProjectInput.value = '';
+    return;
+  }
 
   el.projectActionStatus.textContent = `Opening ${file.name}...`;
   try {
@@ -3865,7 +4590,7 @@ async function importSelectedProject() {
   }
 }
 
-async function importProjectPayload(projectPayload, displayName, desktopProject) {
+async function importProjectPayload(projectPayload, displayName, desktopProject, options = {}) {
   const payload = await api('/api/project/import', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -3875,12 +4600,21 @@ async function importProjectPayload(projectPayload, displayName, desktopProject)
   state.selectedFlowId = null;
   state.selectedFlow = null;
   applyState(payload, true);
+  setProjectDirty(Boolean(options.dirty));
+  if (!options.dirty && !options.keepRecoveryDraft) {
+    await clearRecoveryDraft({ silent: true });
+  }
+  if (!options.skipCheckpointLoad) {
+    await loadProjectCheckpoints();
+  }
+  renderRecentProjects();
+  renderProjectCheckpoints();
   await Promise.all([loadSiteMap(), loadFindings()]);
   el.projectActionStatus.textContent = `Opened ${displayName || 'project'}.`;
 }
 
 async function newProject() {
-  if (!window.confirm('Create a new empty project? Unsaved captured traffic and Echo tabs will be discarded.')) {
+  if (!confirmDiscardProjectChanges('create a new empty project')) {
     return;
   }
 
@@ -3894,6 +4628,11 @@ async function newProject() {
       await window.veilDesktop.forgetProject();
     }
     applyState(payload, true);
+    setProjectDirty(false);
+    await clearRecoveryDraft({ silent: true });
+    state.projectCheckpoints = [];
+    renderRecentProjects();
+    renderProjectCheckpoints();
     await Promise.all([loadSiteMap(), loadFindings()]);
     el.projectActionStatus.textContent = 'New empty project ready.';
   } catch (error) {
@@ -3929,10 +4668,48 @@ async function clearHistory() {
     state.selectedFlowId = null;
     state.selectedFlow = null;
     applyState(payload, false);
+    markProjectDirty();
     await Promise.all([loadSiteMap(), loadFindings()]);
     el.projectActionStatus.textContent = 'Captured traffic cleared.';
   } catch (error) {
     el.projectActionStatus.textContent = `Clear failed: ${formatError(error)}`;
+  }
+}
+
+async function clearRecentProjects() {
+  if (!window.veilDesktop?.clearRecentProjects) {
+    return;
+  }
+
+  try {
+    state.recentProjects = sanitizeRecentProjects(await window.veilDesktop.clearRecentProjects());
+    renderRecentProjects();
+    el.projectActionStatus.textContent = 'Recent projects cleared.';
+  } catch (error) {
+    el.projectActionStatus.textContent = `Could not clear recent projects: ${formatError(error)}`;
+  }
+}
+
+async function clearProjectCheckpoints() {
+  if (!window.veilDesktop?.clearProjectCheckpoints) {
+    return;
+  }
+  const project = currentProjectDisplay();
+  if (!project.path) {
+    el.projectActionStatus.textContent = 'Save the project before using checkpoints.';
+    return;
+  }
+  const targetLabel = project.path ? basename(project.path) : 'all projects';
+  if (!window.confirm(`Clear checkpoints for ${targetLabel}?`)) {
+    return;
+  }
+
+  try {
+    state.projectCheckpoints = sanitizeProjectCheckpoints(await window.veilDesktop.clearProjectCheckpoints(project));
+    renderProjectCheckpoints();
+    el.projectActionStatus.textContent = 'Project checkpoints cleared.';
+  } catch (error) {
+    el.projectActionStatus.textContent = `Could not clear checkpoints: ${formatError(error)}`;
   }
 }
 
@@ -4281,11 +5058,13 @@ async function patchConfig(partial) {
   });
   await refreshHistoryAndSiteMap();
   renderAll({ config: true });
+  markProjectDirty();
 }
 
 function setView(view) {
   const viewTitles = {
     traffic: 'Traffic',
+    search: 'Search',
     siteMap: 'Site Map',
     findings: 'Findings',
     scope: 'Scope',

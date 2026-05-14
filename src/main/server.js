@@ -9,6 +9,12 @@ app
   .then((state) => {
     console.log(`Veil Proxy UI: http://127.0.0.1:${state.apiPort}`);
     console.log(`Proxy listener: 127.0.0.1:${state.proxyPort}`);
+    if (state.mcp && state.mcp.running) {
+      console.log(`MCP server: ${state.mcp.endpoint}`);
+      console.log(`MCP token: ${state.mcp.token}`);
+    } else if (state.mcp && state.mcp.enabled && state.mcp.lastError) {
+      console.log(`MCP server failed: ${state.mcp.lastError}`);
+    }
   })
   .catch((error) => {
     console.error(error);

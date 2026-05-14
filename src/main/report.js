@@ -115,7 +115,7 @@ function renderMarkdownReport(report) {
     lines.push(`Host: ${finding.host || 'unknown'}`);
     lines.push(`Path: ${finding.path || '/'}`);
     lines.push(`Count: ${finding.count}`);
-    lines.push(`Flow IDs: ${finding.flowIds.join(', ') || '-'}`);
+    lines.push(`Request IDs: ${finding.flowIds.join(', ') || '-'}`);
     lines.push(`Last seen: ${formatDate(finding.lastSeenAt)}`);
     lines.push('');
     lines.push(finding.description || '');
