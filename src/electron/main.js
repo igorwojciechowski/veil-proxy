@@ -1,4 +1,5 @@
 const { app, BrowserWindow, Menu, dialog, shell } = require('electron');
+const path = require('path');
 const { createApp } = require('../main/veilApp');
 
 let backend;
@@ -11,6 +12,7 @@ async function createWindow() {
   let state;
   try {
     backend = createApp({
+      projectPath: path.join(app.getPath('userData'), 'projects', 'default.veil.sqlite'),
       config: {
         apiPort: 0,
       },
@@ -50,6 +52,8 @@ async function createWindow() {
     shell.openExternal(url);
     return { action: 'deny' };
   });
+
+  installEditableContextMenu(mainWindow);
 
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -112,10 +116,46 @@ function installMenu() {
       ],
     },
     {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'pasteAndMatchStyle' },
+        { role: 'delete' },
+        { type: 'separator' },
+        { role: 'selectAll' },
+      ],
+    },
+    {
       label: 'Window',
       submenu: [{ role: 'minimize' }, { role: 'zoom' }, ...(isMac ? [{ type: 'separator' }, { role: 'front' }] : [{ role: 'close' }])],
     },
   ];
 
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+function installEditableContextMenu(window) {
+  window.webContents.on('context-menu', (_event, params) => {
+    if (!params.isEditable) {
+      return;
+    }
+
+    Menu.buildFromTemplate([
+      { role: 'undo', enabled: params.editFlags.canUndo },
+      { role: 'redo', enabled: params.editFlags.canRedo },
+      { type: 'separator' },
+      { role: 'cut', enabled: params.editFlags.canCut },
+      { role: 'copy', enabled: params.editFlags.canCopy },
+      { role: 'paste', enabled: params.editFlags.canPaste },
+      { role: 'pasteAndMatchStyle', enabled: params.editFlags.canPaste },
+      { role: 'delete', enabled: params.editFlags.canDelete },
+      { type: 'separator' },
+      { role: 'selectAll', enabled: params.editFlags.canSelectAll },
+    ]).popup({ window });
+  });
 }

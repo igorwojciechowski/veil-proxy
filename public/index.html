@@ -26,6 +26,10 @@
             <span class="nav-icon">☷</span>
             <span>Site Map</span>
           </button>
+          <button class="nav-item" type="button" data-view="findings" title="Findings">
+            <span class="nav-icon">!</span>
+            <span>Findings</span>
+          </button>
           <button class="nav-item" type="button" data-view="scope" title="Scope">
             <span class="nav-icon">◎</span>
             <span>Scope</span>
@@ -57,6 +61,7 @@
             <div class="meta-row">
               <span id="trafficCount">0 reqs</span>
               <span id="pendingCount">0 pending</span>
+              <span id="findingsCount">0 findings</span>
               <span id="upstreamStatus">direct</span>
             </div>
           </div>
@@ -99,6 +104,12 @@
           <div class="split-grid traffic-split" id="trafficSplit">
             <section class="panel traffic-panel">
               <div class="traffic-filter-bar">
+                <label class="traffic-preset-label">
+                  Preset
+                  <select id="trafficPresetSelect"></select>
+                </label>
+                <button id="saveTrafficPresetBtn" class="button ghost compact-button" type="button">Save Preset</button>
+                <button id="deleteTrafficPresetBtn" class="button ghost compact-button" type="button">Delete Preset</button>
                 <label class="traffic-search-label">
                   Search
                   <input id="trafficSearch" class="search-input" type="search" placeholder="ID, host, path, method, status" />
@@ -115,13 +126,25 @@
                   Host
                   <div id="trafficHostFilter" class="checkbox-filter-list"></div>
                 </div>
+                <label class="traffic-extension-mode-label">
+                  Ext mode
+                  <select id="trafficExtensionMode">
+                    <option value="off">Off</option>
+                    <option value="include">Include</option>
+                    <option value="exclude">Exclude</option>
+                  </select>
+                </label>
+                <label class="traffic-extension-label">
+                  Extensions
+                  <input id="trafficExtensionText" class="search-input" type="text" placeholder="js, css, png" />
+                </label>
                 <div class="traffic-filter-group traffic-scope-filter">
                   <div id="trafficScopeFilter" class="checkbox-filter-list"></div>
                 </div>
                 <button id="resetTrafficFiltersBtn" class="button ghost compact-button" type="button">Reset</button>
                 <span id="trafficFilterCount" class="filter-count">0 shown</span>
               </div>
-              <div class="table-wrap">
+              <div id="trafficTableWrap" class="table-wrap">
                 <table class="traffic-table">
                   <thead>
                     <tr>
@@ -314,6 +337,39 @@
           </div>
         </section>
 
+        <section id="findingsView" class="view">
+          <div class="findings-layout">
+            <section class="panel findings-panel">
+              <div class="panel-title-row">
+                <div>
+                  <h2>Findings</h2>
+                  <div id="findingsSubtitle" class="panel-subtitle">0 passive findings</div>
+                </div>
+                <div class="button-row">
+                  <a class="button ghost compact-button" href="/api/report/export" download="veil-proxy-report.md">Export Report</a>
+                  <button id="refreshFindingsBtn" class="button ghost compact-button" type="button">Refresh</button>
+                </div>
+              </div>
+              <div class="findings-filter-bar">
+                <label class="traffic-search-label">
+                  Search
+                  <input id="findingsSearch" class="search-input" type="search" placeholder="Host, path, title, evidence" />
+                </label>
+                <label>
+                  Severity
+                  <select id="findingsSeverityFilter">
+                    <option value="">All</option>
+                    <option value="high">High</option>
+                    <option value="medium">Medium</option>
+                    <option value="low">Low</option>
+                  </select>
+                </label>
+              </div>
+              <div id="findingsList" class="findings-list"></div>
+            </section>
+          </div>
+        </section>
+
         <section id="interceptView" class="view">
           <div class="intercept-layout">
             <div class="intercept-sidebar">
@@ -430,6 +486,23 @@
 
         <section id="settingsView" class="view">
           <div class="settings-grid">
+            <section class="panel settings-panel project-panel">
+              <div class="panel-title-row">
+                <div>
+                  <h2>Project</h2>
+                  <div id="projectName" class="panel-subtitle">Memory session</div>
+                </div>
+                <div class="button-row">
+                  <button id="exportProjectBtn" class="button ghost compact-button" type="button">Export</button>
+                  <button id="importProjectBtn" class="button ghost compact-button" type="button">Import</button>
+                  <button id="clearHistoryBtn" class="button danger compact-button" type="button">Clear History</button>
+                </div>
+              </div>
+              <div id="projectPath" class="project-path">No project file</div>
+              <input id="importProjectInput" class="hidden" type="file" accept="application/json,.json" />
+              <div id="projectActionStatus" class="hint-line">Project stores proxy config, captured traffic, and Echo tabs.</div>
+            </section>
+
             <section class="panel settings-panel">
               <div class="panel-title-row">
                 <h2>Proxy</h2>
@@ -460,6 +533,20 @@
                 </div>
               </div>
               <div id="upstreamRulesList" class="upstream-rules-list"></div>
+            </section>
+
+            <section class="panel settings-panel rewrite-rules-panel">
+              <div class="panel-title-row">
+                <div>
+                  <h2>Rewrite</h2>
+                  <div id="rewriteRulesCount" class="panel-subtitle">0 rules</div>
+                </div>
+                <div class="button-row">
+                  <button id="addRewriteRuleBtn" class="button ghost compact-button" type="button">+ Rule</button>
+                  <button id="saveRewriteRulesBtn" class="button primary compact-button" type="button">Save Rewrite</button>
+                </div>
+              </div>
+              <div id="rewriteRulesList" class="rewrite-rules-list"></div>
             </section>
 
             <section class="panel settings-panel">
@@ -502,6 +589,7 @@
 
     <div id="contextMenu" class="context-menu hidden" role="menu">
       <button id="sendToEchoContextBtn" type="button" role="menuitem">Send to Echo</button>
+      <button id="showFlowsContextBtn" type="button" role="menuitem">Show reqs</button>
       <button id="addToScopeContextBtn" type="button" role="menuitem">Add to scope</button>
       <button id="removeFromScopeContextBtn" type="button" role="menuitem">Remove from scope</button>
     </div>

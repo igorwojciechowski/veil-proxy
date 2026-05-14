@@ -4,6 +4,7 @@ const tls = require('tls');
 const { EventEmitter } = require('events');
 const { closeIdleTransports, createTunnel, requestViaTransport } = require('./transport');
 const { CertificateAuthority } = require('./certAuthority');
+const { buildFindings } = require('./findings');
 const {
   decodeBody,
   encodeBodyForClient,
@@ -14,14 +15,15 @@ const {
 } = require('./httpMessage');
 
 class ProxyServer extends EventEmitter {
-  constructor(config) {
+  constructor(config, options = {}) {
     super();
     this.config = structuredClone(config);
     this.server = this.createHttpServer();
-    this.history = [];
+    this.store = options.store || null;
+    this.history = Array.isArray(options.history) ? options.history : [];
     this.pending = new Map();
     this.pendingCounter = 1;
-    this.flowCounter = 1;
+    this.flowCounter = nextFlowCounter(this.history);
     this.port = this.config.proxyPort;
     this.certAuthority = new CertificateAuthority(this.config.https && this.config.https.certDir);
     this.mitmTargets = new WeakMap();
@@ -38,6 +40,7 @@ class ProxyServer extends EventEmitter {
     await listenServer(this.server, this.config.proxyPort, this.config.proxyHost);
     this.port = this.server.address().port;
     this.config.proxyPort = this.port;
+    this.persistConfig();
   }
 
   stop() {
@@ -100,6 +103,9 @@ class ProxyServer extends EventEmitter {
       upstreamRules: Object.prototype.hasOwnProperty.call(nextConfig, 'upstreamRules')
         ? sanitizeUpstreamRules(nextConfig.upstreamRules)
         : this.config.upstreamRules || [],
+      rewriteRules: Object.prototype.hasOwnProperty.call(nextConfig, 'rewriteRules')
+        ? sanitizeRewriteRules(nextConfig.rewriteRules)
+        : this.config.rewriteRules || [],
     };
 
     if (
@@ -115,6 +121,11 @@ class ProxyServer extends EventEmitter {
     }
 
     this.config = candidate;
+    if (this.history.length > this.config.historyLimit) {
+      this.history.length = this.config.historyLimit;
+    }
+    this.persistConfig();
+    this.prunePersistedHistory();
 
     if (Object.prototype.hasOwnProperty.call(https, 'certDir') && https.certDir !== this.certAuthority.certDir) {
       this.certAuthority = new CertificateAuthority(https.certDir);
@@ -152,6 +163,35 @@ class ProxyServer extends EventEmitter {
 
   getSiteMap() {
     return buildSiteMap(this.history, (flow) => this.isFlowInScope(flow));
+  }
+
+  getFindings() {
+    return buildFindings(this.history);
+  }
+
+  replaceHistory(history, options = {}) {
+    const nextHistory = Array.isArray(history) ? structuredClone(history).filter((flow) => flow && flow.id && flow.request) : [];
+    this.history = nextHistory.slice(0, this.config.historyLimit);
+    this.flowCounter = nextFlowCounter(this.history);
+
+    if (options.persist !== false && this.store) {
+      this.store.clearHistory();
+      for (const flow of this.history) {
+        this.store.upsertFlow(flow);
+      }
+      this.store.pruneHistory(this.config.historyLimit);
+    }
+
+    return this.listHistory();
+  }
+
+  clearHistory() {
+    this.history = [];
+    this.flowCounter = 1;
+    if (this.store) {
+      this.store.clearHistory();
+    }
+    return this.listHistory();
   }
 
   async sendEchoRequest(payload = {}) {
@@ -286,6 +326,8 @@ class ProxyServer extends EventEmitter {
     this.addHistory(flow);
 
     try {
+      this.applyRewriteRules('request', flow);
+
       const requestDecision = await this.maybeIntercept('request', flow, {
         method: flow.request.method,
         url: flow.request.url,
@@ -300,7 +342,7 @@ class ProxyServer extends EventEmitter {
         flow.durationMs = flow.completedAt - flow.startedAt;
         clientRes.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
         clientRes.end('Dropped by Veil Proxy.');
-        this.emit('history', this.summarizeFlow(flow));
+        this.emitHistory(flow);
         return;
       }
 
@@ -308,7 +350,7 @@ class ProxyServer extends EventEmitter {
         applyRequestModification(flow, requestDecision);
       }
 
-      this.emit('history', this.summarizeFlow(flow));
+      this.emitHistory(flow);
 
       const upstreamResponse = await requestViaTransport({
         targetUrl: new URL(flow.request.url),
@@ -331,6 +373,8 @@ class ProxyServer extends EventEmitter {
         bodyTruncated: upstreamResponse.body.truncated,
       };
 
+      this.applyRewriteRules('response', flow);
+
       const responseDecision = await this.maybeIntercept('response', flow, {
         statusCode: flow.response.statusCode,
         statusMessage: flow.response.statusMessage,
@@ -345,7 +389,7 @@ class ProxyServer extends EventEmitter {
         flow.durationMs = flow.completedAt - flow.startedAt;
         clientRes.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
         clientRes.end('Response dropped by Veil Proxy.');
-        this.emit('history', this.summarizeFlow(flow));
+        this.emitHistory(flow);
         return;
       }
 
@@ -372,12 +416,12 @@ class ProxyServer extends EventEmitter {
 
       flow.completedAt = Date.now();
       flow.durationMs = flow.completedAt - flow.startedAt;
-      this.emit('history', this.summarizeFlow(flow));
+      this.emitHistory(flow);
     } catch (error) {
       flow.error = error.message;
       flow.completedAt = Date.now();
       flow.durationMs = flow.completedAt - flow.startedAt;
-      this.emit('history', this.summarizeFlow(flow));
+      this.emitHistory(flow);
 
       if (!clientRes.headersSent) {
         clientRes.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
@@ -418,7 +462,7 @@ class ProxyServer extends EventEmitter {
     };
 
     this.addHistory(flow);
-    this.emit('history', this.summarizeFlow(flow));
+    this.emitHistory(flow);
 
     if (this.shouldMitmConnect(host, port)) {
       this.handleHttpsMitmConnect(flow, clientSocket, head);
@@ -450,7 +494,7 @@ class ProxyServer extends EventEmitter {
         if (!flow.completedAt) {
           flow.completedAt = Date.now();
           flow.durationMs = flow.completedAt - startedAt;
-          this.emit('history', this.summarizeFlow(flow));
+          this.emitHistory(flow);
         }
       };
 
@@ -468,7 +512,7 @@ class ProxyServer extends EventEmitter {
       flow.error = error.message;
       flow.completedAt = Date.now();
       flow.durationMs = flow.completedAt - startedAt;
-      this.emit('history', this.summarizeFlow(flow));
+      this.emitHistory(flow);
       clientSocket.end('HTTP/1.1 502 Bad Gateway\r\ncontent-type: text/plain\r\n\r\nVeil Proxy CONNECT error\r\n');
     }
   }
@@ -506,7 +550,7 @@ class ProxyServer extends EventEmitter {
         if (!flow.completedAt) {
           flow.completedAt = Date.now();
           flow.durationMs = flow.completedAt - startedAt;
-          this.emit('history', this.summarizeFlow(flow));
+          this.emitHistory(flow);
         }
       };
 
@@ -524,7 +568,7 @@ class ProxyServer extends EventEmitter {
       flow.error = error.message;
       flow.completedAt = Date.now();
       flow.durationMs = flow.completedAt - startedAt;
-      this.emit('history', this.summarizeFlow(flow));
+      this.emitHistory(flow);
       clientSocket.end('HTTP/1.1 502 Bad Gateway\r\ncontent-type: text/plain\r\n\r\nVeil Proxy HTTPS MITM error\r\n');
     }
   }
@@ -572,6 +616,32 @@ class ProxyServer extends EventEmitter {
     if (this.history.length > this.config.historyLimit) {
       this.history.length = this.config.historyLimit;
     }
+    this.persistFlow(flow);
+    this.prunePersistedHistory();
+  }
+
+  emitHistory(flow) {
+    this.persistFlow(flow);
+    this.emit('history', this.summarizeFlow(flow));
+  }
+
+  persistFlow(flow) {
+    if (!this.store) {
+      return;
+    }
+    this.store.upsertFlow(flow);
+  }
+
+  persistConfig() {
+    if (this.store) {
+      this.store.setConfig(this.config);
+    }
+  }
+
+  prunePersistedHistory() {
+    if (this.store) {
+      this.store.pruneHistory(this.config.historyLimit);
+    }
   }
 
   summarizeFlow(flow) {
@@ -598,6 +668,18 @@ class ProxyServer extends EventEmitter {
 
   isFlowInScope(flow) {
     return matchesScope(this.config.scope, flow);
+  }
+
+  applyRewriteRules(stage, flow) {
+    const activeRules = sanitizeRewriteRules(this.config.rewriteRules).filter(
+      (rule) => rule.enabled && (rule.stage === stage || rule.stage === 'both'),
+    );
+    for (const rule of activeRules) {
+      const changed = applyRewriteRule(stage, flow, rule);
+      if (changed) {
+        flow.notes.push(`Rewrite applied: ${rule.name || rule.id} (${rule.id})`);
+      }
+    }
   }
 
   maybeIntercept(stage, flow, editable) {
@@ -648,6 +730,14 @@ function closeServer(server) {
     }
     server.close(() => resolve());
   });
+}
+
+function nextFlowCounter(history) {
+  const maxId = (Array.isArray(history) ? history : []).reduce((max, flow) => {
+    const id = Number(flow && flow.id);
+    return Number.isFinite(id) ? Math.max(max, id) : max;
+  }, 0);
+  return maxId + 1;
 }
 
 function normalizeProxyHost(value) {
@@ -795,6 +885,34 @@ function sanitizeUpstreamRouteRules(rawRules) {
     .filter(Boolean);
 }
 
+function sanitizeRewriteRules(rawRules) {
+  if (!Array.isArray(rawRules)) return [];
+  return rawRules
+    .slice(0, 100)
+    .map((rule, index) => {
+      const raw = rule && typeof rule === 'object' ? rule : {};
+      const stage = ['request', 'response', 'both'].includes(raw.stage) ? raw.stage : 'request';
+      const target = ['url', 'method', 'status', 'statusMessage', 'header', 'body'].includes(raw.target) ? raw.target : 'body';
+      const matchType = ['literal', 'regex'].includes(raw.matchType) ? raw.matchType : 'literal';
+      const headerName = String(raw.headerName || '').trim().slice(0, 120);
+      if (target === 'header' && !headerName) {
+        return null;
+      }
+      return {
+        id: String(raw.id || `rewrite-${Date.now()}-${index}`),
+        name: String(raw.name || `Rewrite ${index + 1}`).trim().slice(0, 120),
+        enabled: raw.enabled !== false,
+        stage,
+        target,
+        headerName,
+        matchType,
+        match: String(raw.match || '').slice(0, 4000),
+        replace: String(raw.replace || '').slice(0, 4000),
+      };
+    })
+    .filter(Boolean);
+}
+
 function normalizeUpstream(raw = {}) {
   const mode = ['direct', 'http', 'socks5'].includes(raw.mode) ? raw.mode : 'direct';
   return {
@@ -908,7 +1026,7 @@ function sanitizeInterceptRules(rules) {
     const rule = rawRule && typeof rawRule === 'object' ? rawRule : {};
     const stage = ['request', 'response', 'both'].includes(rule.stage) ? rule.stage : 'both';
     const field = ['url', 'host', 'method', 'status', 'header', 'body'].includes(rule.field) ? rule.field : 'url';
-    const operator = ['contains', 'equals', 'startsWith', 'endsWith', 'regex', 'exists'].includes(rule.operator)
+    const operator = ['contains', 'equals', 'startsWith', 'endsWith', 'regex', 'exists', 'domain', 'domainSubdomains'].includes(rule.operator)
       ? rule.operator
       : 'contains';
 
@@ -1035,6 +1153,10 @@ function matchesCandidate(candidate, operator, value) {
     return false;
   }
 
+  if (operator === 'domain' || operator === 'domainSubdomains') {
+    return matchesDomainCandidate(haystackRaw, needleRaw, operator === 'domainSubdomains');
+  }
+
   if (operator === 'regex') {
     try {
       return new RegExp(needleRaw, 'i').test(haystackRaw);
@@ -1049,6 +1171,141 @@ function matchesCandidate(candidate, operator, value) {
   if (operator === 'startsWith') return haystack.startsWith(needle);
   if (operator === 'endsWith') return haystack.endsWith(needle);
   return haystack.includes(needle);
+}
+
+function matchesDomainCandidate(candidate, value, includeSubdomains) {
+  const host = normalizeDomain(candidate);
+  const domain = normalizeDomain(value);
+  if (!host || !domain) return false;
+  return host === domain || (includeSubdomains && host.endsWith(`.${domain}`));
+}
+
+function normalizeDomain(value) {
+  const text = String(value || '')
+    .trim()
+    .replace(/^\*\./, '')
+    .split(/[/?#]/, 1)[0];
+  if (!text) return '';
+
+  try {
+    return new URL(text.includes('://') ? text : `http://${text}`).hostname.toLowerCase();
+  } catch {
+    return text
+      .replace(/:\d+$/, '')
+      .toLowerCase();
+  }
+}
+
+function applyRewriteRule(stage, flow, rule) {
+  if (flow.type !== 'http') return false;
+  if (stage === 'request') {
+    return applyRequestRewrite(flow, rule);
+  }
+  return applyResponseRewrite(flow, rule);
+}
+
+function applyRequestRewrite(flow, rule) {
+  if (rule.target === 'url') {
+    const next = rewriteText(flow.request.url || '', rule);
+    if (next === flow.request.url || !/^https?:\/\//i.test(next)) return false;
+    flow.request.url = next;
+    const headers = normalizeHeaderObject(flow.request.headers);
+    headers.host = new URL(next).host;
+    flow.request.headers = headers;
+    return true;
+  }
+
+  if (rule.target === 'method') {
+    const next = rewriteText(flow.request.method || '', rule).trim().toUpperCase();
+    if (!next || next === flow.request.method || !/^[A-Z0-9_-]{1,24}$/.test(next)) return false;
+    flow.request.method = next;
+    return true;
+  }
+
+  if (rule.target === 'header') {
+    return rewriteHeaderValue(flow.request.headers, rule);
+  }
+
+  if (rule.target === 'body') {
+    return rewriteMessageBody(flow.request, rule, false);
+  }
+
+  return false;
+}
+
+function applyResponseRewrite(flow, rule) {
+  if (!flow.response) return false;
+
+  if (rule.target === 'status') {
+    const next = Number(rewriteText(String(flow.response.statusCode || ''), rule));
+    if (!Number.isInteger(next) || next < 100 || next > 599 || next === flow.response.statusCode) return false;
+    flow.response.statusCode = next;
+    return true;
+  }
+
+  if (rule.target === 'statusMessage') {
+    const next = rewriteText(flow.response.statusMessage || '', rule);
+    if (next === flow.response.statusMessage) return false;
+    flow.response.statusMessage = next.slice(0, 120);
+    return true;
+  }
+
+  if (rule.target === 'header') {
+    return rewriteHeaderValue(flow.response.headers, rule);
+  }
+
+  if (rule.target === 'body') {
+    return rewriteMessageBody(flow.response, rule, true);
+  }
+
+  return false;
+}
+
+function rewriteHeaderValue(headers, rule) {
+  const normalized = normalizeHeaderObject(headers);
+  const key = Object.keys(normalized).find((name) => name.toLowerCase() === rule.headerName.toLowerCase()) || rule.headerName.toLowerCase();
+  const current = normalized[key] || '';
+  const next = rule.match ? rewriteText(current, rule) : rule.replace;
+  if (next === current) return false;
+  if (next === '' && current) {
+    delete normalized[key];
+  } else {
+    normalized[key] = next;
+  }
+  Object.keys(headers).forEach((name) => delete headers[name]);
+  Object.assign(headers, normalized);
+  return true;
+}
+
+function rewriteMessageBody(message, rule, response) {
+  const current = message.bodyText || '';
+  const next = rewriteText(current, rule);
+  if (next === current) return false;
+
+  message.bodyText = next;
+  message.bodyBase64 = Buffer.from(next).toString('base64');
+  const headers = normalizeHeaderObject(message.headers);
+  headers['content-length'] = String(Buffer.byteLength(next));
+  if (response) {
+    delete headers['content-encoding'];
+  }
+  message.headers = headers;
+  return true;
+}
+
+function rewriteText(value, rule) {
+  const text = String(value || '');
+  if (rule.matchType === 'regex') {
+    try {
+      return text.replace(new RegExp(rule.match || '', 'g'), rule.replace || '');
+    } catch {
+      return text;
+    }
+  }
+  if (!rule.match) {
+    return text;
+  }
+  return text.split(rule.match).join(rule.replace || '');
 }
 
 function buildSiteMap(history, inScopeFn) {

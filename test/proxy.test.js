@@ -214,6 +214,75 @@ test('intercepts only requests matching enabled rules', async () => {
   }
 });
 
+test('applies automatic rewrite rules to requests and responses', async () => {
+  const origin = await createOriginServer();
+  const app = createApp({
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+      rewriteRules: [
+        {
+          id: 'rewrite-request-body',
+          enabled: true,
+          stage: 'request',
+          target: 'body',
+          matchType: 'literal',
+          match: 'original-body',
+          replace: 'changed-body',
+        },
+        {
+          id: 'rewrite-response-body',
+          enabled: true,
+          stage: 'response',
+          target: 'body',
+          matchType: 'literal',
+          match: '/rewrite-target',
+          replace: '/rewritten-target',
+        },
+        {
+          id: 'rewrite-response-header',
+          enabled: true,
+          stage: 'response',
+          target: 'header',
+          headerName: 'x-veil-rewrite',
+          match: '',
+          replace: 'applied',
+        },
+      ],
+    },
+  });
+
+  await app.start();
+
+  try {
+    const target = `http://127.0.0.1:${origin.port}/rewrite-target`;
+    const response = await proxyRequest(app.proxy.port, {
+      method: 'POST',
+      path: target,
+      headers: {
+        host: `127.0.0.1:${origin.port}`,
+        'content-type': 'text/plain',
+      },
+      body: 'original-body',
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.headers['x-veil-rewrite'], 'applied');
+    assert.deepEqual(JSON.parse(response.body), {
+      method: 'POST',
+      url: '/rewritten-target',
+      body: 'changed-body',
+    });
+
+    const [flow] = app.proxy.listHistory();
+    assert.equal(flow.notes.some((note) => note.includes('rewrite-request-body')), true);
+    assert.equal(flow.notes.some((note) => note.includes('rewrite-response-body')), true);
+  } finally {
+    await app.stop();
+    await origin.close();
+  }
+});
+
 test('forwards HTTP requests through a strict SOCKS5 upstream proxy', async () => {
   const origin = await createOriginServer();
   const socks = await createSocks5Server({ requireIpAddressTypeForIpTargets: true });
@@ -607,6 +676,377 @@ test('builds site map entries and applies scope rules', async () => {
   }
 });
 
+test('scope rules support domain presets and path prefixes', async () => {
+  const origin = await createOriginServer();
+  const app = createApp({
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+      scope: {
+        enabled: true,
+        rules: [
+          {
+            id: 'include-local-domain',
+            enabled: true,
+            action: 'include',
+            field: 'host',
+            operator: 'domain',
+            value: '127.0.0.1',
+          },
+          {
+            id: 'exclude-admin-prefix',
+            enabled: true,
+            action: 'exclude',
+            field: 'path',
+            operator: 'startsWith',
+            value: '/admin',
+          },
+        ],
+      },
+    },
+  });
+
+  await app.start();
+
+  try {
+    for (const path of ['/api/items', '/admin/panel']) {
+      const target = `http://127.0.0.1:${origin.port}${path}`;
+      const response = await proxyRequest(app.proxy.port, {
+        method: 'GET',
+        path: target,
+        headers: {
+          host: `127.0.0.1:${origin.port}`,
+        },
+      });
+      assert.equal(response.statusCode, 200);
+    }
+
+    const summaries = app.proxy.listHistory();
+    assert.equal(summaries.some((flow) => flow.path === '/api/items' && flow.inScope), true);
+    assert.equal(summaries.some((flow) => flow.path === '/admin/panel' && !flow.inScope), true);
+  } finally {
+    await app.stop();
+    await origin.close();
+  }
+});
+
+test('builds passive findings from captured traffic', async () => {
+  const origin = await createOriginServer();
+  const app = createApp({
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+    },
+  });
+
+  await app.start();
+
+  try {
+    const target = `http://127.0.0.1:${origin.port}/login?token=abc123`;
+    const response = await proxyRequest(app.proxy.port, {
+      method: 'POST',
+      path: target,
+      headers: {
+        host: `127.0.0.1:${origin.port}`,
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      body: 'username=admin&password=secret',
+    });
+    assert.equal(response.statusCode, 200);
+
+    const findings = await apiRequest(app.api.port, '/api/findings');
+    assert.equal(findings.some((finding) => finding.id.startsWith('sensitive-request-data:') && finding.severity === 'high'), true);
+    assert.equal(findings.some((finding) => finding.id.startsWith('cleartext-http:') && finding.severity === 'medium'), true);
+    assert.equal(findings.every((finding) => Array.isArray(finding.flowIds)), true);
+  } finally {
+    await app.stop();
+    await origin.close();
+  }
+});
+
+test('builds and exports project reports', async () => {
+  const origin = await createOriginServer();
+  const app = createApp({
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+      scope: {
+        enabled: true,
+        rules: [
+          {
+            id: 'scope-login',
+            enabled: true,
+            action: 'include',
+            field: 'url',
+            operator: 'contains',
+            value: '/login',
+          },
+        ],
+      },
+    },
+  });
+
+  await app.start();
+
+  try {
+    const target = `http://127.0.0.1:${origin.port}/login?token=abc123`;
+    const response = await proxyRequest(app.proxy.port, {
+      method: 'POST',
+      path: target,
+      headers: {
+        host: `127.0.0.1:${origin.port}`,
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      body: 'username=admin&password=secret',
+    });
+    assert.equal(response.statusCode, 200);
+
+    const report = await apiRequest(app.api.port, '/api/report');
+    assert.equal(report.summary.requests, 1);
+    assert.equal(report.summary.inScopeRequests, 1);
+    assert.equal(report.summary.findingsBySeverity.high, 1);
+    assert.equal(report.scope.rules[0].value, '/login');
+    assert.equal(report.findings.some((finding) => finding.title === 'Sensitive data in request'), true);
+
+    const markdown = await apiTextRequest(app.api.port, '/api/report/export');
+    assert.equal(markdown.statusCode, 200);
+    assert.match(markdown.headers['content-type'], /text\/markdown/);
+    assert.match(markdown.body, /# Veil Proxy Report/);
+    assert.match(markdown.body, /Sensitive data in request/);
+  } finally {
+    await app.stop();
+    await origin.close();
+  }
+});
+
+test('persists config and captured HTTP history in a project database', async () => {
+  const origin = await createOriginServer();
+  const projectPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'veil-proxy-project-')), 'project.sqlite');
+  let app = createApp({
+    projectPath,
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+    },
+  });
+
+  await app.start();
+
+  try {
+    const target = `http://127.0.0.1:${origin.port}/persisted?x=1`;
+    const response = await proxyRequest(app.proxy.port, {
+      method: 'POST',
+      path: target,
+      headers: {
+        host: `127.0.0.1:${origin.port}`,
+        'content-type': 'text/plain',
+      },
+      body: 'project-body',
+    });
+    assert.equal(response.statusCode, 200);
+
+    await app.proxy.updateConfig({
+      scope: {
+        enabled: true,
+        rules: [
+          {
+            id: 'persisted-scope',
+            enabled: true,
+            action: 'include',
+            field: 'url',
+            operator: 'equals',
+            value: `http://127.0.0.1:${origin.port}/persisted`,
+          },
+        ],
+      },
+    });
+  } finally {
+    await app.stop();
+  }
+
+  app = createApp({
+    projectPath,
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+    },
+  });
+
+  await app.start();
+
+  try {
+    const config = app.proxy.getConfig();
+    assert.equal(config.scope.enabled, true);
+    assert.equal(config.scope.rules[0].value, `http://127.0.0.1:${origin.port}/persisted`);
+
+    const history = app.proxy.listHistory();
+    const summary = history.find((flow) => flow.path === '/persisted');
+    assert.ok(summary);
+    assert.equal(summary.statusCode, 200);
+    assert.equal(summary.inScope, true);
+
+    const flow = app.proxy.getFlow(summary.id);
+    assert.equal(flow.request.bodyText, 'project-body');
+    assert.equal(JSON.parse(flow.response.bodyText).url, '/persisted?x=1');
+  } finally {
+    await app.stop();
+    await origin.close();
+  }
+});
+
+test('persists Echo tabs and groups through the UI state API', async () => {
+  const projectPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'veil-proxy-echo-project-')), 'project.sqlite');
+  let app = createApp({
+    projectPath,
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+    },
+  });
+
+  await app.start();
+
+  try {
+    const saved = await apiRequest(app.api.port, '/api/ui-state', 'PATCH', {
+      echo: {
+        tabs: [
+          {
+            id: 'echo-one',
+            title: 'Saved request',
+            customTitle: true,
+            groupId: 'group-one',
+            source: 'test',
+            method: 'POST',
+            rawRequest: 'POST /saved HTTP/1.1\r\nHost: example.test\r\n\r\nbody',
+            response: {
+              statusCode: 201,
+              statusMessage: 'Created',
+              headers: { 'content-type': 'application/json' },
+              bodyText: '{"ok":true}',
+              bodyBase64: Buffer.from('{"ok":true}').toString('base64'),
+            },
+            color: 'pink',
+          },
+        ],
+        groups: [{ id: 'group-one', title: 'Saved group', color: 'amber' }],
+        selectedTabId: 'echo-one',
+        selectedGroupId: 'group-one',
+        split: 63,
+      },
+      traffic: {
+        presets: [
+          {
+            id: 'traffic-api',
+            name: 'API without static',
+            filter: {
+              search: '/api,/rest',
+              inScopeOnly: true,
+              filters: {
+                method: ['GET'],
+                status: ['4xx', '5xx'],
+                host: ['example.test'],
+              },
+              extension: {
+                mode: 'exclude',
+                value: 'png, jpg, css, js',
+              },
+            },
+          },
+        ],
+      },
+    });
+    assert.equal(saved.echo.tabs[0].title, 'Saved request');
+    assert.equal(saved.traffic.presets[0].name, 'API without static');
+  } finally {
+    await app.stop();
+  }
+
+  app = createApp({
+    projectPath,
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+    },
+  });
+
+  await app.start();
+
+  try {
+    const state = await apiRequest(app.api.port, '/api/state');
+    assert.equal(state.ui.echo.tabs.length, 1);
+    assert.equal(state.ui.echo.tabs[0].id, 'echo-one');
+    assert.equal(state.ui.echo.tabs[0].color, 'pink');
+    assert.equal(state.ui.echo.groups[0].title, 'Saved group');
+    assert.equal(state.ui.echo.selectedTabId, 'echo-one');
+    assert.equal(state.ui.echo.selectedGroupId, 'group-one');
+    assert.equal(state.ui.echo.split, 63);
+    assert.equal(state.ui.traffic.presets[0].id, 'traffic-api');
+    assert.equal(state.ui.traffic.presets[0].filter.extension.mode, 'exclude');
+    assert.equal(state.ui.traffic.presets[0].filter.filters.status.includes('5xx'), true);
+  } finally {
+    await app.stop();
+  }
+});
+
+test('exports, clears, and imports project snapshots', async () => {
+  const origin = await createOriginServer();
+  const projectPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'veil-proxy-export-project-')), 'project.sqlite');
+  const app = createApp({
+    projectPath,
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+    },
+  });
+
+  await app.start();
+
+  try {
+    const target = `http://127.0.0.1:${origin.port}/snapshot`;
+    const response = await proxyRequest(app.proxy.port, {
+      method: 'GET',
+      path: target,
+      headers: {
+        host: `127.0.0.1:${origin.port}`,
+      },
+    });
+    assert.equal(response.statusCode, 200);
+
+    await apiRequest(app.api.port, '/api/ui-state', 'PATCH', {
+      echo: {
+        tabs: [
+          {
+            id: 'snapshot-tab',
+            title: 'Snapshot tab',
+            method: 'GET',
+            rawRequest: `GET /snapshot HTTP/1.1\r\nHost: 127.0.0.1:${origin.port}\r\n\r\n`,
+          },
+        ],
+        groups: [],
+        selectedTabId: 'snapshot-tab',
+        split: 55,
+      },
+    });
+
+    const exported = await apiRequest(app.api.port, '/api/project/export');
+    assert.equal(exported.version, 1);
+    assert.equal(exported.history.some((flow) => flow.request.url === target), true);
+    assert.equal(exported.ui.echo.tabs[0].id, 'snapshot-tab');
+
+    const cleared = await apiRequest(app.api.port, '/api/history', 'DELETE');
+    assert.equal(cleared.history.length, 0);
+    assert.equal(app.proxy.listHistory().length, 0);
+
+    const imported = await apiRequest(app.api.port, '/api/project/import', 'POST', exported);
+    assert.equal(imported.history.some((flow) => flow.url === target), true);
+    assert.equal(imported.ui.echo.tabs[0].id, 'snapshot-tab');
+    assert.equal(app.proxy.listHistory().some((flow) => flow.url === target), true);
+  } finally {
+    await app.stop();
+    await origin.close();
+  }
+});
+
 async function createOriginServer() {
   const server = http.createServer((req, res) => {
     const chunks = [];
@@ -784,6 +1224,79 @@ function proxyRequest(proxyPort, options) {
     req.on('error', reject);
     if (body.length > 0) {
       req.write(body);
+    }
+    req.end();
+  });
+}
+
+function apiRequest(apiPort, urlPath, method = 'GET', body = null) {
+  return new Promise((resolve, reject) => {
+    const payload = body == null ? Buffer.alloc(0) : Buffer.from(JSON.stringify(body));
+    const req = http.request(
+      {
+        host: '127.0.0.1',
+        port: apiPort,
+        method,
+        path: urlPath,
+        headers: {
+          accept: 'application/json',
+          ...(payload.length > 0
+            ? {
+                'content-type': 'application/json',
+                'content-length': payload.length,
+              }
+            : {}),
+        },
+      },
+      (res) => {
+        const chunks = [];
+        res.on('data', (chunk) => chunks.push(chunk));
+        res.on('end', () => {
+          const text = Buffer.concat(chunks).toString('utf8');
+          if (res.statusCode < 200 || res.statusCode >= 300) {
+            reject(new Error(text || `HTTP ${res.statusCode}`));
+            return;
+          }
+          resolve(text ? JSON.parse(text) : null);
+        });
+      },
+    );
+
+    req.on('error', reject);
+    if (payload.length > 0) {
+      req.write(payload);
+    }
+    req.end();
+  });
+}
+
+function apiTextRequest(apiPort, urlPath, method = 'GET', body = null) {
+  return new Promise((resolve, reject) => {
+    const payload = body == null ? Buffer.alloc(0) : Buffer.from(String(body));
+    const req = http.request(
+      {
+        host: '127.0.0.1',
+        port: apiPort,
+        method,
+        path: urlPath,
+        headers: payload.length > 0 ? { 'content-length': payload.length } : {},
+      },
+      (res) => {
+        const chunks = [];
+        res.on('data', (chunk) => chunks.push(chunk));
+        res.on('end', () => {
+          resolve({
+            statusCode: res.statusCode,
+            headers: res.headers,
+            body: Buffer.concat(chunks).toString('utf8'),
+          });
+        });
+      },
+    );
+
+    req.on('error', reject);
+    if (payload.length > 0) {
+      req.write(payload);
     }
     req.end();
   });

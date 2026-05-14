@@ -4,7 +4,9 @@ if (new URLSearchParams(window.location.search).get('desktop') === '1') {
 
 const state = {
   config: null,
+  project: null,
   history: [],
+  findings: [],
   pending: [],
   selectedFlowId: null,
   selectedFlow: null,
@@ -17,6 +19,13 @@ const state = {
     host: [],
   },
   trafficInScopeOnly: false,
+  trafficExtensionFilter: {
+    mode: 'off',
+    value: '',
+  },
+  trafficPresets: [],
+  selectedTrafficPreset: '',
+  trafficPersistenceReady: false,
   openTrafficFilter: '',
   trafficSort: {
     key: 'id',
@@ -28,6 +37,15 @@ const state = {
     showDetail: true,
     splitSize: 58,
   },
+  virtual: {
+    traffic: { scrollTop: 0 },
+    siteHosts: { scrollTop: 0 },
+    sitePaths: { scrollTop: 0 },
+  },
+  visibleTrafficRows: [],
+  visibleSiteHosts: [],
+  visibleSitePathItems: [],
+  siteCollapsedNodes: new Set(),
   activeTab: 'request',
   messageTabs: {
     request: 'pretty',
@@ -37,14 +55,18 @@ const state = {
   selectedSiteHost: null,
   siteMapSearch: '',
   siteMapInScopeOnly: false,
+  findingsSearch: '',
+  findingsSeverity: '',
   echoTabs: [],
   echoGroups: [],
   selectedEchoGroupId: null,
   selectedEchoTabId: null,
+  echoPersistenceReady: false,
   openEchoColorPicker: null,
   echoSplit: 50,
   echoContextFlowId: null,
   contextFlowId: null,
+  contextTarget: null,
   rulesModalStage: 'request',
 };
 
@@ -52,17 +74,24 @@ const el = {
   viewTitle: document.querySelector('#viewTitle'),
   trafficCount: document.querySelector('#trafficCount'),
   pendingCount: document.querySelector('#pendingCount'),
+  findingsCount: document.querySelector('#findingsCount'),
   upstreamStatus: document.querySelector('#upstreamStatus'),
   proxyAddress: document.querySelector('#proxyAddress'),
   requestInterceptToggle: document.querySelector('#requestInterceptToggle'),
   responseInterceptToggle: document.querySelector('#responseInterceptToggle'),
   trafficSplit: document.querySelector('#trafficSplit'),
+  trafficTableWrap: document.querySelector('#trafficTableWrap'),
   trafficPaneResizer: document.querySelector('#trafficPaneResizer'),
   trafficRows: document.querySelector('#trafficRows'),
+  trafficPresetSelect: document.querySelector('#trafficPresetSelect'),
+  saveTrafficPresetBtn: document.querySelector('#saveTrafficPresetBtn'),
+  deleteTrafficPresetBtn: document.querySelector('#deleteTrafficPresetBtn'),
   trafficSearch: document.querySelector('#trafficSearch'),
   trafficMethodFilter: document.querySelector('#trafficMethodFilter'),
   trafficStatusFilter: document.querySelector('#trafficStatusFilter'),
   trafficHostFilter: document.querySelector('#trafficHostFilter'),
+  trafficExtensionMode: document.querySelector('#trafficExtensionMode'),
+  trafficExtensionText: document.querySelector('#trafficExtensionText'),
   trafficScopeFilter: document.querySelector('#trafficScopeFilter'),
   resetTrafficFiltersBtn: document.querySelector('#resetTrafficFiltersBtn'),
   trafficFilterCount: document.querySelector('#trafficFilterCount'),
@@ -78,6 +107,11 @@ const el = {
   sitePathsSubtitle: document.querySelector('#sitePathsSubtitle'),
   sitePathsList: document.querySelector('#sitePathsList'),
   refreshSiteMapBtn: document.querySelector('#refreshSiteMapBtn'),
+  findingsSubtitle: document.querySelector('#findingsSubtitle'),
+  findingsSearch: document.querySelector('#findingsSearch'),
+  findingsSeverityFilter: document.querySelector('#findingsSeverityFilter'),
+  findingsList: document.querySelector('#findingsList'),
+  refreshFindingsBtn: document.querySelector('#refreshFindingsBtn'),
   echoTabs: document.querySelector('#echoTabs'),
   echoGroupList: document.querySelector('#echoGroupList'),
   newEchoTabBtn: document.querySelector('#newEchoTabBtn'),
@@ -95,6 +129,7 @@ const el = {
   echoRawResponse: document.querySelector('#echoRawResponse'),
   contextMenu: document.querySelector('#contextMenu'),
   sendToEchoContextBtn: document.querySelector('#sendToEchoContextBtn'),
+  showFlowsContextBtn: document.querySelector('#showFlowsContextBtn'),
   addToScopeContextBtn: document.querySelector('#addToScopeContextBtn'),
   removeFromScopeContextBtn: document.querySelector('#removeFromScopeContextBtn'),
   emptyDetail: document.querySelector('#emptyDetail'),
@@ -150,6 +185,13 @@ const el = {
   proxyPort: document.querySelector('#proxyPort'),
   saveProxyBtn: document.querySelector('#saveProxyBtn'),
   proxySaveStatus: document.querySelector('#proxySaveStatus'),
+  projectName: document.querySelector('#projectName'),
+  projectPath: document.querySelector('#projectPath'),
+  exportProjectBtn: document.querySelector('#exportProjectBtn'),
+  importProjectBtn: document.querySelector('#importProjectBtn'),
+  importProjectInput: document.querySelector('#importProjectInput'),
+  clearHistoryBtn: document.querySelector('#clearHistoryBtn'),
+  projectActionStatus: document.querySelector('#projectActionStatus'),
   scopeStatus: document.querySelector('#scopeStatus'),
   scopeEnabledToggle: document.querySelector('#scopeEnabledToggle'),
   includeScopeCount: document.querySelector('#includeScopeCount'),
@@ -167,15 +209,61 @@ const el = {
   upstreamRulesList: document.querySelector('#upstreamRulesList'),
   addUpstreamRuleBtn: document.querySelector('#addUpstreamRuleBtn'),
   saveConfigBtn: document.querySelector('#saveConfigBtn'),
+  rewriteRulesCount: document.querySelector('#rewriteRulesCount'),
+  rewriteRulesList: document.querySelector('#rewriteRulesList'),
+  addRewriteRuleBtn: document.querySelector('#addRewriteRuleBtn'),
+  saveRewriteRulesBtn: document.querySelector('#saveRewriteRulesBtn'),
 };
 
 let siteMapLoadTimer = null;
+let findingsLoadTimer = null;
+let echoPersistTimer = null;
+
+const VIRTUAL_BUFFER_ROWS = 8;
+const TRAFFIC_ROW_HEIGHT = 42;
+const SITE_HOST_ROW_HEIGHT = 74;
+const SITE_TREE_ROW_HEIGHT = 74;
+const STATIC_EXTENSIONS = 'jpg,jpeg,png,gif,webp,avif,svg,ico,css,js,map,woff,woff2,ttf,eot,otf';
+const BUILTIN_TRAFFIC_PRESETS = [
+  { id: 'all', name: 'All traffic', filter: { search: '', inScopeOnly: false, filters: { method: [], status: [], host: [] }, extension: { mode: 'off', value: '' } } },
+  { id: 'in-scope', name: 'Only in scope', filter: { search: '', inScopeOnly: true, filters: { method: [], status: [], host: [] }, extension: { mode: 'off', value: '' } } },
+  { id: 'errors', name: 'Only errors', filter: { search: '', inScopeOnly: false, filters: { method: [], status: ['error'], host: [] }, extension: { mode: 'off', value: '' } } },
+  {
+    id: 'auth-session',
+    name: 'Auth/session',
+    filter: { search: 'auth,login,session,cookie,token,jwt,bearer,password,oauth', inScopeOnly: false, filters: { method: [], status: [], host: [] }, extension: { mode: 'off', value: '' } },
+  },
+  {
+    id: 'api-only',
+    name: 'API only',
+    filter: { search: '/api,/rest,/graphql,/v1,/v2', inScopeOnly: false, filters: { method: [], status: [], host: [] }, extension: { mode: 'exclude', value: STATIC_EXTENSIONS } },
+  },
+  { id: '4xx-5xx', name: '4xx/5xx', filter: { search: '', inScopeOnly: false, filters: { method: [], status: ['4xx', '5xx'], host: [] }, extension: { mode: 'off', value: '' } } },
+  {
+    id: 'exclude-static-ext',
+    name: 'Exclude static extensions',
+    filter: { search: '', inScopeOnly: false, filters: { method: [], status: [], host: [] }, extension: { mode: 'exclude', value: STATIC_EXTENSIONS } },
+  },
+];
+const SCOPE_PRESETS = {
+  domain: { label: 'Domain', field: 'host', operator: 'domain' },
+  'domain-subdomains': { label: 'Domain + subdomains', field: 'host', operator: 'domainSubdomains' },
+  'exact-url': { label: 'Exact URL without query', field: 'url', operator: 'equals' },
+  'path-prefix': { label: 'Path prefix', field: 'path', operator: 'startsWith' },
+  regex: { label: 'Regex URL', field: 'url', operator: 'regex' },
+  custom: { label: 'Custom', field: 'url', operator: 'contains' },
+};
+
+window.addEventListener('pagehide', () => {
+  flushEchoState();
+  flushTrafficPresets();
+});
 
 async function init() {
   bindUi();
   const payload = await api('/api/state');
   applyState(payload);
-  await loadSiteMap();
+  await Promise.all([loadSiteMap(), loadFindings()]);
   openEvents();
 }
 
@@ -204,6 +292,23 @@ function bindUi() {
 
   el.trafficSearch.addEventListener('input', () => {
     state.trafficSearch = el.trafficSearch.value.trim().toLowerCase();
+    state.selectedTrafficPreset = '';
+    resetTrafficVirtualScroll();
+    renderTraffic();
+  });
+  el.trafficPresetSelect.addEventListener('change', () => applyTrafficPreset(el.trafficPresetSelect.value));
+  el.saveTrafficPresetBtn.addEventListener('click', saveCurrentTrafficPreset);
+  el.deleteTrafficPresetBtn.addEventListener('click', deleteSelectedTrafficPreset);
+  el.trafficExtensionMode.addEventListener('change', () => {
+    state.trafficExtensionFilter.mode = el.trafficExtensionMode.value;
+    state.selectedTrafficPreset = '';
+    resetTrafficVirtualScroll();
+    renderTraffic();
+  });
+  el.trafficExtensionText.addEventListener('input', () => {
+    state.trafficExtensionFilter.value = el.trafficExtensionText.value;
+    state.selectedTrafficPreset = '';
+    resetTrafficVirtualScroll();
     renderTraffic();
   });
   [el.trafficMethodFilter, el.trafficStatusFilter, el.trafficHostFilter, el.trafficScopeFilter].forEach((container) => {
@@ -221,18 +326,66 @@ function bindUi() {
   el.showTrafficListToggle.addEventListener('change', () => setTrafficLayout({ showList: el.showTrafficListToggle.checked }));
   el.showTrafficDetailToggle.addEventListener('change', () => setTrafficLayout({ showDetail: el.showTrafficDetailToggle.checked }));
   el.trafficPaneResizer.addEventListener('mousedown', startTrafficPaneResize);
+  el.trafficTableWrap.addEventListener('scroll', () => {
+    state.virtual.traffic.scrollTop = el.trafficTableWrap.scrollTop;
+    renderTrafficRows(state.visibleTrafficRows);
+  });
+  el.trafficRows.addEventListener('click', (event) => {
+    const row = event.target.closest('[data-flow-id]');
+    if (row) {
+      loadFlow(row.dataset.flowId);
+    }
+  });
 
   el.siteMapSearch.addEventListener('input', () => {
     state.siteMapSearch = el.siteMapSearch.value.trim().toLowerCase();
+    resetSiteMapVirtualScroll();
     renderSiteMap();
   });
 
   el.siteMapInScopeOnly.addEventListener('change', () => {
     state.siteMapInScopeOnly = el.siteMapInScopeOnly.checked;
+    resetSiteMapVirtualScroll();
     renderSiteMap();
+  });
+  el.siteHostsList.addEventListener('scroll', () => {
+    state.virtual.siteHosts.scrollTop = el.siteHostsList.scrollTop;
+    renderVirtualSiteHosts(state.visibleSiteHosts);
+  });
+  el.siteHostsList.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-site-host]');
+    if (!button) return;
+    state.selectedSiteHost = button.dataset.siteHost;
+    resetSitePathVirtualScroll();
+    renderSiteMap();
+  });
+  el.sitePathsList.addEventListener('scroll', () => {
+    state.virtual.sitePaths.scrollTop = el.sitePathsList.scrollTop;
+    renderVirtualSitePathItems(state.visibleSitePathItems);
+  });
+  el.sitePathsList.addEventListener('click', async (event) => {
+    const nodeButton = event.target.closest('[data-site-node-id]');
+    if (nodeButton) {
+      toggleSiteTreeNode(nodeButton.dataset.siteNodeId);
+      return;
+    }
+
+    const flowButton = event.target.closest('[data-flow-id]');
+    if (!flowButton?.dataset.flowId) return;
+    await loadFlow(flowButton.dataset.flowId);
+    setView('traffic');
   });
 
   el.refreshSiteMapBtn.addEventListener('click', () => loadSiteMap());
+  el.refreshFindingsBtn.addEventListener('click', () => loadFindings());
+  el.findingsSearch.addEventListener('input', () => {
+    state.findingsSearch = el.findingsSearch.value.trim().toLowerCase();
+    renderFindings();
+  });
+  el.findingsSeverityFilter.addEventListener('change', () => {
+    state.findingsSeverity = el.findingsSeverityFilter.value;
+    renderFindings();
+  });
   el.newEchoTabBtn.addEventListener('click', () => createBlankEchoTab());
   el.newEchoGroupBtn.addEventListener('click', createEchoGroup);
   el.sendEchoBtn.addEventListener('click', sendSelectedEchoRequest);
@@ -244,12 +397,13 @@ function bindUi() {
   document.addEventListener('click', closeContextMenu);
   window.addEventListener('blur', closeContextMenu);
   el.sendToEchoContextBtn.addEventListener('click', () => {
-    const flowId = state.contextFlowId;
+    const flowId = state.contextTarget?.echoFlowId || state.echoContextFlowId || state.contextFlowId;
     closeContextMenu();
     if (flowId) {
       sendFlowToEcho(flowId);
     }
   });
+  el.showFlowsContextBtn.addEventListener('click', showContextFlows);
   el.addToScopeContextBtn.addEventListener('click', () => applyScopeFromContext('include'));
   el.removeFromScopeContextBtn.addEventListener('click', () => applyScopeFromContext('exclude'));
 
@@ -261,14 +415,21 @@ function bindUi() {
     patchConfig({ intercept: { responses: el.responseInterceptToggle.checked } });
   });
 
+  [el.proxyHost, el.proxyPort].forEach((input) => {
+    input.addEventListener('input', syncProxyDraftFromDom);
+  });
   el.saveConfigBtn.addEventListener('click', () => {
+    syncProxyDraftFromDom();
+    syncUpstreamDraftFromDom();
     patchConfig({
       upstream: { mode: 'direct', host: '', port: 0, username: '', password: '' },
-      upstreams: readUpstreamRows(),
+      upstreams: state.config.upstreams || [],
       upstreamRules: [],
     });
   });
   el.addUpstreamRuleBtn.addEventListener('click', addUpstreamRuleRow);
+  el.addRewriteRuleBtn.addEventListener('click', addRewriteRuleRow);
+  el.saveRewriteRulesBtn.addEventListener('click', saveRewriteRules);
   el.upstreamRulesList.addEventListener('click', (event) => {
     const deleteButton = event.target.closest('[data-delete-upstream-rule]');
     if (deleteButton) {
@@ -281,11 +442,44 @@ function bindUi() {
       const label = enabled.closest('.upstream-enabled-toggle')?.querySelector('[data-enabled-label]');
       if (label) label.textContent = enabled.checked ? 'On' : 'Off';
     }
+    if (event.target.closest('[data-upstream-rule-field]')) {
+      syncUpstreamDraftFromDom();
+    }
+  });
+  el.upstreamRulesList.addEventListener('input', (event) => {
+    if (event.target.closest('[data-upstream-rule-field]')) {
+      syncUpstreamDraftFromDom();
+    }
+  });
+  el.rewriteRulesList.addEventListener('click', (event) => {
+    const deleteButton = event.target.closest('[data-delete-rewrite-rule]');
+    if (deleteButton) {
+      deleteRewriteRuleRow(deleteButton.dataset.deleteRewriteRule);
+    }
+  });
+  el.rewriteRulesList.addEventListener('change', (event) => {
+    const targetSelect = event.target.closest('[data-rewrite-field="target"]');
+    if (targetSelect) {
+      updateRewriteRuleRow(targetSelect.closest('.rewrite-rule-row'));
+    }
+    if (event.target.closest('[data-rewrite-field]')) {
+      syncRewriteDraftFromDom();
+    }
+  });
+  el.rewriteRulesList.addEventListener('input', (event) => {
+    if (event.target.closest('[data-rewrite-field]')) {
+      syncRewriteDraftFromDom();
+    }
   });
 
   el.saveProxyBtn.addEventListener('click', saveProxyConfig);
+  el.exportProjectBtn.addEventListener('click', exportProject);
+  el.importProjectBtn.addEventListener('click', () => el.importProjectInput.click());
+  el.importProjectInput.addEventListener('change', importSelectedProject);
+  el.clearHistoryBtn.addEventListener('click', clearHistory);
   el.addIncludeScopeRuleBtn.addEventListener('click', () => addScopeRule('include'));
   el.addExcludeScopeRuleBtn.addEventListener('click', () => addScopeRule('exclude'));
+  el.scopeEnabledToggle.addEventListener('change', syncScopeDraftFromDom);
   el.saveScopeBtn.addEventListener('click', saveScopeConfig);
   [el.includeScopeRulesList, el.excludeScopeRulesList].forEach((list) => {
     list.addEventListener('click', (event) => {
@@ -295,9 +489,32 @@ function bindUi() {
       }
     });
     list.addEventListener('change', (event) => {
+      const presetSelect = event.target.closest('[data-scope-field="preset"]');
+      if (presetSelect) {
+        applyScopePreset(presetSelect.closest('.rule-row'), presetSelect.value);
+        syncScopeDraftFromDom();
+        return;
+      }
+
       const fieldSelect = event.target.closest('[data-scope-field="field"]');
       if (fieldSelect) {
+        setScopePreset(fieldSelect.closest('.rule-row'), 'custom');
         updateScopeRuleRow(fieldSelect.closest('.rule-row'));
+      }
+      const operatorSelect = event.target.closest('[data-scope-field="operator"]');
+      if (operatorSelect) {
+        setScopePreset(operatorSelect.closest('.rule-row'), 'custom');
+        updateScopeRuleRow(operatorSelect.closest('.rule-row'));
+      }
+      if (event.target.closest('[data-scope-field]')) {
+        syncScopeDraftFromDom();
+        updateScopeMatchCounts();
+      }
+    });
+    list.addEventListener('input', (event) => {
+      if (event.target.closest('[data-scope-field]')) {
+        syncScopeDraftFromDom();
+        updateScopeMatchCounts();
       }
     });
   });
@@ -330,25 +547,51 @@ function bindUi() {
 
 function openEvents() {
   const events = new EventSource('/api/events');
-  events.addEventListener('state', (event) => applyState(JSON.parse(event.data)));
+  events.addEventListener('state', (event) => applyState(JSON.parse(event.data), false, { renderConfig: !state.config }));
+  events.addEventListener('ui', (event) => applyUiState(JSON.parse(event.data), false));
   events.addEventListener('history', (event) => upsertHistory(JSON.parse(event.data)));
   events.addEventListener('pending', (event) => {
     state.pending = JSON.parse(event.data);
-    renderAll();
+    renderAll({ config: false });
   });
   events.addEventListener('config', (event) => {
     state.config = JSON.parse(event.data);
     renderConfig();
     renderMeta();
-    refreshHistoryAndSiteMap().then(renderAll).catch(console.error);
+    refreshHistoryAndSiteMap()
+      .then(() => renderAll({ config: false }))
+      .catch(console.error);
   });
 }
 
-function applyState(payload) {
+function applyState(payload, forceUi = false, options = {}) {
   state.config = payload.config;
+  state.project = payload.project || null;
   state.history = payload.history || [];
   state.pending = payload.pending || [];
-  renderAll();
+  applyUiState(payload.ui, forceUi);
+  state.selectedFlowId = state.history.some((flow) => flow.id === state.selectedFlowId) ? state.selectedFlowId : null;
+  state.selectedFlow = state.selectedFlowId ? state.selectedFlow : null;
+  renderAll({ config: options.renderConfig !== false });
+}
+
+function applyUiState(ui, force = false) {
+  if (ui?.traffic && (!state.trafficPersistenceReady || force)) {
+    state.trafficPresets = sanitizeTrafficPresets(ui.traffic.presets);
+    state.trafficPersistenceReady = true;
+  }
+
+  if (!ui?.echo || (state.echoPersistenceReady && !force)) {
+    return;
+  }
+
+  const echo = ui.echo;
+  state.echoTabs = Array.isArray(echo.tabs) ? echo.tabs : [];
+  state.echoGroups = Array.isArray(echo.groups) ? echo.groups : [];
+  state.selectedEchoTabId = echo.selectedTabId || state.echoTabs[0]?.id || null;
+  state.selectedEchoGroupId = echo.selectedGroupId || null;
+  state.echoSplit = clampNumber(echo.split, 25, 75, 50);
+  state.echoPersistenceReady = true;
 }
 
 function upsertHistory(flow) {
@@ -362,18 +605,23 @@ function upsertHistory(flow) {
   if (state.selectedFlowId === flow.id) {
     loadFlow(flow.id);
   }
-  renderAll();
+  renderAll({ config: false });
   scheduleSiteMapLoad();
+  scheduleFindingsLoad();
 }
 
-function renderAll() {
+function renderAll(options = {}) {
   renderMeta();
-  renderConfig();
+  if (options.config === true) {
+    renderConfig();
+  }
   renderTraffic();
   renderSiteMap();
+  renderFindings();
   renderEcho();
   renderPending();
   renderDetail();
+  updateScopeMatchCounts();
 }
 
 function renderMeta() {
@@ -385,21 +633,55 @@ function renderMeta() {
   const trafficCount = trafficHistory().length;
   el.trafficCount.textContent = `${trafficCount} ${trafficCount === 1 ? 'req' : 'reqs'}`;
   el.pendingCount.textContent = `${state.pending.length} pending`;
+  el.findingsCount.textContent = `${state.findings.length} ${state.findings.length === 1 ? 'finding' : 'findings'}`;
   el.upstreamStatus.textContent = upstreams.length === 0 ? 'direct' : `${upstreams.length} upstream${upstreams.length === 1 ? '' : 's'}`;
 }
 
-function renderConfig() {
+function renderConfig(options = {}) {
   if (!state.config) return;
   const { intercept } = state.config;
+  const preserveActive = options.force !== true;
+  const editingSettings = preserveActive && isActiveEditableIn(document.querySelector('#settingsView'));
+  const editingScope = preserveActive && isActiveEditableIn(document.querySelector('#scopeView'));
+  const editingRules = preserveActive && isActiveEditableIn(el.rulesModal);
+
   el.requestInterceptToggle.checked = Boolean(intercept.requests);
   el.responseInterceptToggle.checked = Boolean(intercept.responses);
-  if (!el.rulesModal.classList.contains('hidden')) {
+  if (!editingRules && !el.rulesModal.classList.contains('hidden')) {
     renderRules();
   }
-  el.proxyHost.value = state.config.proxyHost;
-  el.proxyPort.value = state.config.proxyPort;
-  renderUpstreamRules();
-  renderScopeRules();
+  if (!editingSettings) {
+    el.proxyHost.value = state.config.proxyHost;
+    el.proxyPort.value = state.config.proxyPort;
+    renderUpstreamRules();
+    renderRewriteRules();
+  }
+  if (!editingScope) {
+    renderScopeRules();
+  }
+  renderProject();
+}
+
+function renderProject() {
+  if (!el.projectName || !el.projectPath) return;
+  const project = state.project || {};
+  el.projectName.textContent = project.name || 'Memory session';
+  el.projectPath.textContent = project.path || 'No project file';
+}
+
+function isActiveEditableIn(container) {
+  const active = document.activeElement;
+  return Boolean(container && active && container.contains(active) && isEditableControl(active));
+}
+
+function isEditableControl(element) {
+  return Boolean(element?.matches?.('input, textarea, select, [contenteditable="true"]'));
+}
+
+function syncProxyDraftFromDom() {
+  if (!state.config) return;
+  state.config.proxyHost = el.proxyHost.value.trim();
+  state.config.proxyPort = Number(el.proxyPort.value || 0);
 }
 
 function renderUpstreamRules() {
@@ -480,6 +762,12 @@ function deleteUpstreamRuleRow(id) {
   state.config.upstreams = readUpstreamRows().filter((upstream) => upstream.id !== id);
   state.config.upstreamRules = [];
   renderUpstreamRules();
+}
+
+function syncUpstreamDraftFromDom() {
+  if (!state.config || !el.upstreamRulesList) return;
+  state.config.upstreams = readUpstreamRows();
+  state.config.upstreamRules = [];
 }
 
 function readUpstreamRows() {
@@ -567,39 +855,218 @@ function parseUpstreamPatternLine(line) {
   };
 }
 
+function renderRewriteRules() {
+  const rules = Array.isArray(state.config?.rewriteRules) ? state.config.rewriteRules : [];
+  el.rewriteRulesCount.textContent = `${rules.length} ${rules.length === 1 ? 'rule' : 'rules'}`;
+  el.rewriteRulesList.innerHTML =
+    rules
+      .map(
+        (rule, index) => `
+          <div class="rewrite-rule-row" data-rewrite-rule-id="${escapeHtml(rule.id || `rewrite-${index}`)}">
+            <label class="upstream-enabled-toggle rewrite-enabled-toggle">
+              <input type="checkbox" data-rewrite-field="enabled" ${rule.enabled === false ? '' : 'checked'} />
+              <span class="mini-switch"></span>
+              <span>On</span>
+            </label>
+            <label>
+              Name
+              <input data-rewrite-field="name" type="text" value="${escapeHtml(rule.name || `Rewrite ${index + 1}`)}" />
+            </label>
+            <label>
+              Stage
+              <select data-rewrite-field="stage">
+                ${ruleOption('request', 'Request', rule.stage || 'request')}
+                ${ruleOption('response', 'Response', rule.stage || 'request')}
+                ${ruleOption('both', 'Both', rule.stage || 'request')}
+              </select>
+            </label>
+            <label>
+              Target
+              <select data-rewrite-field="target">
+                ${ruleOption('url', 'URL', rule.target || 'body')}
+                ${ruleOption('method', 'Method', rule.target || 'body')}
+                ${ruleOption('status', 'Status', rule.target || 'body')}
+                ${ruleOption('statusMessage', 'Status text', rule.target || 'body')}
+                ${ruleOption('header', 'Header', rule.target || 'body')}
+                ${ruleOption('body', 'Body', rule.target || 'body')}
+              </select>
+            </label>
+            <label class="rewrite-header-name">
+              Header
+              <input data-rewrite-field="headerName" type="text" value="${escapeHtml(rule.headerName || '')}" placeholder="x-custom-header" />
+            </label>
+            <label>
+              Match
+              <select data-rewrite-field="matchType">
+                ${ruleOption('literal', 'Literal', rule.matchType || 'literal')}
+                ${ruleOption('regex', 'Regex', rule.matchType || 'literal')}
+              </select>
+            </label>
+            <label class="wide">
+              Find
+              <textarea data-rewrite-field="match" spellcheck="false">${escapeHtml(rule.match || '')}</textarea>
+            </label>
+            <label class="wide">
+              Replace
+              <textarea data-rewrite-field="replace" spellcheck="false">${escapeHtml(rule.replace || '')}</textarea>
+            </label>
+            <button class="button ghost compact-button" type="button" data-delete-rewrite-rule="${escapeHtml(rule.id || `rewrite-${index}`)}">Delete</button>
+          </div>
+        `,
+      )
+      .join('') || '<div class="message-empty">No rewrite rules configured.</div>';
+  el.rewriteRulesList.querySelectorAll('.rewrite-rule-row').forEach(updateRewriteRuleRow);
+}
+
+function addRewriteRuleRow() {
+  syncRewriteDraftFromDom();
+  const rules = readRewriteRows();
+  rules.push({
+    id: `rewrite-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    name: `Rewrite ${rules.length + 1}`,
+    enabled: true,
+    stage: 'request',
+    target: 'body',
+    headerName: '',
+    matchType: 'literal',
+    match: '',
+    replace: '',
+  });
+  state.config.rewriteRules = rules;
+  renderRewriteRules();
+}
+
+function deleteRewriteRuleRow(id) {
+  syncRewriteDraftFromDom();
+  state.config.rewriteRules = readRewriteRows().filter((rule) => rule.id !== id);
+  renderRewriteRules();
+}
+
+async function saveRewriteRules() {
+  syncRewriteDraftFromDom();
+  await patchConfig({ rewriteRules: state.config.rewriteRules || [] });
+}
+
+function syncRewriteDraftFromDom() {
+  if (!state.config || !el.rewriteRulesList) return;
+  state.config.rewriteRules = readRewriteRows();
+}
+
+function readRewriteRows() {
+  return [...el.rewriteRulesList.querySelectorAll('[data-rewrite-rule-id]')].map((row) => ({
+    id: row.dataset.rewriteRuleId,
+    name: row.querySelector('[data-rewrite-field="name"]').value.trim(),
+    enabled: row.querySelector('[data-rewrite-field="enabled"]').checked,
+    stage: row.querySelector('[data-rewrite-field="stage"]').value,
+    target: row.querySelector('[data-rewrite-field="target"]').value,
+    headerName: row.querySelector('[data-rewrite-field="headerName"]').value.trim(),
+    matchType: row.querySelector('[data-rewrite-field="matchType"]').value,
+    match: row.querySelector('[data-rewrite-field="match"]').value,
+    replace: row.querySelector('[data-rewrite-field="replace"]').value,
+  }));
+}
+
+function updateRewriteRuleRow(row) {
+  if (!row) return;
+  const target = row.querySelector('[data-rewrite-field="target"]').value;
+  row.querySelector('.rewrite-header-name').classList.toggle('hidden', target !== 'header');
+}
+
 function renderTraffic() {
   renderTrafficFilterControls();
   renderTrafficLayout();
   const rows = filteredHistory();
+  state.visibleTrafficRows = rows;
   el.trafficFilterCount.textContent = `${rows.length} shown`;
-  el.trafficRows.innerHTML = rows
-    .map((flow) => {
-      const url = safeUrl(flow.url);
-      const path = url ? `${url.pathname}${url.search}` : flow.url;
-      const status = flow.error ? 'ERR' : flow.statusCode || (flow.type === 'connect' ? 'TUN' : '-');
-      const size = flow.type === 'connect' ? formatBytes((flow.tunnel?.bytesUp || 0) + (flow.tunnel?.bytesDown || 0)) : formatBytes(flow.responseBytes || 0);
-      const duration = flow.durationMs === null || flow.durationMs === undefined ? 'open' : `${flow.durationMs}ms`;
-      const echoAttr = flow.type === 'http' ? `data-echo-flow-id="${escapeHtml(flow.id)}"` : '';
-      const scopeLabel = flow.inScope ? 'in' : 'out';
-      return `
-        <tr data-flow-id="${escapeHtml(flow.id)}" ${echoAttr} class="${flow.id === state.selectedFlowId ? 'selected' : ''}">
-          <td class="flow-id-cell">#${escapeHtml(flow.id)}</td>
-          <td><span class="method-pill">${escapeHtml(flow.method)}</span></td>
-          <td title="${escapeHtml(flow.host || '')}">${escapeHtml(flow.host || '')}</td>
-          <td title="${escapeHtml(path || '')}">${escapeHtml(path || '')}</td>
-          <td><span class="status-pill ${flow.error ? 'error' : ''}">${escapeHtml(String(status))}</span></td>
-          <td><span class="scope-chip ${flow.inScope ? 'in-scope' : 'out-scope'}">${escapeHtml(scopeLabel)}</span></td>
-          <td>${escapeHtml(size)}</td>
-          <td>${escapeHtml(duration)}</td>
-        </tr>
-      `;
-    })
-    .join('');
-
-  el.trafficRows.querySelectorAll('tr').forEach((row) => {
-    row.addEventListener('click', () => loadFlow(row.dataset.flowId));
-  });
+  renderTrafficRows(rows);
   renderTrafficSortHeaders();
+}
+
+function renderTrafficRows(rows) {
+  const window = virtualWindow(el.trafficTableWrap, state.virtual.traffic, rows.length, TRAFFIC_ROW_HEIGHT);
+  const visibleRows = rows.slice(window.start, window.end);
+  el.trafficRows.innerHTML = `
+    ${renderTrafficSpacerRow(window.top, 8)}
+    ${visibleRows.map(renderTrafficRow).join('')}
+    ${renderTrafficSpacerRow(window.bottom, 8)}
+  `;
+}
+
+function renderTrafficSpacerRow(height, colspan) {
+  if (height <= 0) return '';
+  return `<tr class="virtual-spacer-row" aria-hidden="true"><td colspan="${colspan}" style="height:${height}px"></td></tr>`;
+}
+
+function renderTrafficRow(flow) {
+  const url = safeUrl(flow.url);
+  const path = url ? `${url.pathname}${url.search}` : flow.url;
+  const status = flow.error ? 'ERR' : flow.statusCode || (flow.type === 'connect' ? 'TUN' : '-');
+  const size = flow.type === 'connect' ? formatBytes((flow.tunnel?.bytesUp || 0) + (flow.tunnel?.bytesDown || 0)) : formatBytes(flow.responseBytes || 0);
+  const duration = flow.durationMs === null || flow.durationMs === undefined ? 'open' : `${flow.durationMs}ms`;
+  const echoAttr = flow.type === 'http' ? `data-echo-flow-id="${escapeHtml(flow.id)}"` : '';
+  const scopeLabel = flow.inScope ? 'in' : 'out';
+  const rowClasses = [flow.id === state.selectedFlowId ? 'selected' : '', flow.error ? 'error-row' : ''].filter(Boolean).join(' ');
+  return `
+    <tr data-flow-id="${escapeHtml(flow.id)}" ${echoAttr} class="${rowClasses}">
+      <td class="flow-id-cell">#${escapeHtml(flow.id)}</td>
+      <td><span class="method-pill">${escapeHtml(flow.method)}</span></td>
+      <td title="${escapeHtml(flow.host || '')}">${escapeHtml(flow.host || '')}</td>
+      <td title="${escapeHtml(path || '')}">${escapeHtml(path || '')}</td>
+      <td><span class="status-pill ${flow.error ? 'error' : ''}">${escapeHtml(String(status))}</span></td>
+      <td><span class="scope-chip ${flow.inScope ? 'in-scope' : 'out-scope'}">${escapeHtml(scopeLabel)}</span></td>
+      <td>${escapeHtml(size)}</td>
+      <td>${escapeHtml(duration)}</td>
+    </tr>
+  `;
+}
+
+function virtualWindow(container, virtual, totalItems, rowHeight) {
+  const viewportHeight = Math.max(container?.clientHeight || 0, rowHeight * 8);
+  const maxScrollTop = Math.max(0, totalItems * rowHeight - viewportHeight);
+  const scrollTop = Math.min(Math.max(container?.scrollTop || virtual.scrollTop || 0, 0), maxScrollTop);
+  virtual.scrollTop = scrollTop;
+  const start = Math.max(0, Math.floor(scrollTop / rowHeight) - VIRTUAL_BUFFER_ROWS);
+  const count = Math.ceil(viewportHeight / rowHeight) + VIRTUAL_BUFFER_ROWS * 2;
+  const end = Math.min(totalItems, start + count);
+  return {
+    start,
+    end,
+    top: start * rowHeight,
+    bottom: Math.max(0, (totalItems - end) * rowHeight),
+    total: totalItems * rowHeight,
+  };
+}
+
+function renderVirtualList(content, totalHeight, offsetTop, windowClass = 'virtual-list-window') {
+  return `
+    <div class="virtual-list" style="height:${totalHeight}px">
+      <div class="${windowClass}" style="transform:translateY(${offsetTop}px)">
+        ${content}
+      </div>
+    </div>
+  `;
+}
+
+function resetSiteMapVirtualScroll() {
+  state.virtual.siteHosts.scrollTop = 0;
+  resetSitePathVirtualScroll();
+  if (el.siteHostsList) {
+    el.siteHostsList.scrollTop = 0;
+  }
+}
+
+function resetSitePathVirtualScroll() {
+  state.virtual.sitePaths.scrollTop = 0;
+  if (el.sitePathsList) {
+    el.sitePathsList.scrollTop = 0;
+  }
+}
+
+function resetTrafficVirtualScroll() {
+  state.virtual.traffic.scrollTop = 0;
+  if (el.trafficTableWrap) {
+    el.trafficTableWrap.scrollTop = 0;
+  }
 }
 
 function renderTrafficFilterControls() {
@@ -608,6 +1075,14 @@ function renderTrafficFilterControls() {
   const hosts = uniqueSorted(traffic.map((flow) => flow.host).filter(Boolean));
   state.trafficFilters.method = state.trafficFilters.method.filter((method) => methods.includes(method));
   state.trafficFilters.host = state.trafficFilters.host.filter((host) => hosts.includes(host));
+  renderTrafficPresetSelect();
+  if (document.activeElement !== el.trafficExtensionMode) {
+    el.trafficExtensionMode.value = state.trafficExtensionFilter.mode;
+  }
+  if (document.activeElement !== el.trafficExtensionText) {
+    el.trafficExtensionText.value = state.trafficExtensionFilter.value;
+  }
+  el.deleteTrafficPresetBtn.disabled = !selectedCustomTrafficPreset();
   renderCheckboxFilter(
     el.trafficMethodFilter,
     'method',
@@ -656,10 +1131,147 @@ function renderCheckboxFilter(container, key, options) {
 function renderScopeFilter() {
   el.trafficScopeFilter.innerHTML = `
     <label class="scope-filter-check">
-      <span>In scope</span>
       <input id="trafficInScopeOnly" type="checkbox" ${state.trafficInScopeOnly ? 'checked' : ''} />
+      <span>In scope</span>
     </label>
   `;
+}
+
+function renderTrafficPresetSelect() {
+  const current = state.selectedTrafficPreset;
+  el.trafficPresetSelect.innerHTML = `
+    <option value="">Custom filters</option>
+    <optgroup label="Built-in">
+      ${BUILTIN_TRAFFIC_PRESETS.map((preset) => `<option value="builtin:${escapeHtml(preset.id)}">${escapeHtml(preset.name)}</option>`).join('')}
+    </optgroup>
+    ${
+      state.trafficPresets.length
+        ? `<optgroup label="Saved">${state.trafficPresets
+            .map((preset) => `<option value="custom:${escapeHtml(preset.id)}">${escapeHtml(preset.name)}</option>`)
+            .join('')}</optgroup>`
+        : ''
+    }
+  `;
+  el.trafficPresetSelect.value = current;
+  if (el.trafficPresetSelect.value !== current) {
+    state.selectedTrafficPreset = '';
+  }
+}
+
+function applyTrafficPreset(value) {
+  const preset = trafficPresetBySelectValue(value);
+  if (!preset) {
+    state.selectedTrafficPreset = '';
+    return;
+  }
+
+  state.selectedTrafficPreset = value;
+  applyTrafficFilterSnapshot(preset.filter);
+  resetTrafficVirtualScroll();
+  renderTraffic();
+}
+
+function trafficPresetBySelectValue(value) {
+  if (!value) return null;
+  if (value.startsWith('builtin:')) {
+    return BUILTIN_TRAFFIC_PRESETS.find((preset) => preset.id === value.slice(8)) || null;
+  }
+  if (value.startsWith('custom:')) {
+    return state.trafficPresets.find((preset) => preset.id === value.slice(7)) || null;
+  }
+  return null;
+}
+
+function saveCurrentTrafficPreset() {
+  const name = window.prompt('Preset name', selectedCustomTrafficPreset()?.name || 'Traffic preset');
+  if (!name || !name.trim()) return;
+
+  const existing = selectedCustomTrafficPreset();
+  const preset = {
+    id: existing?.id || `preset-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    name: name.trim().slice(0, 80),
+    filter: currentTrafficFilterSnapshot(),
+  };
+
+  state.trafficPresets = existing
+    ? state.trafficPresets.map((item) => (item.id === existing.id ? preset : item))
+    : [...state.trafficPresets, preset];
+  state.selectedTrafficPreset = `custom:${preset.id}`;
+  persistTrafficPresets().catch(console.error);
+  renderTraffic();
+}
+
+function deleteSelectedTrafficPreset() {
+  const preset = selectedCustomTrafficPreset();
+  if (!preset) return;
+  state.trafficPresets = state.trafficPresets.filter((item) => item.id !== preset.id);
+  state.selectedTrafficPreset = '';
+  persistTrafficPresets().catch(console.error);
+  renderTraffic();
+}
+
+function selectedCustomTrafficPreset() {
+  if (!state.selectedTrafficPreset.startsWith('custom:')) return null;
+  const id = state.selectedTrafficPreset.slice(7);
+  return state.trafficPresets.find((preset) => preset.id === id) || null;
+}
+
+function currentTrafficFilterSnapshot() {
+  return {
+    search: state.trafficSearch,
+    inScopeOnly: state.trafficInScopeOnly,
+    filters: {
+      method: [...state.trafficFilters.method],
+      status: [...state.trafficFilters.status],
+      host: [...state.trafficFilters.host],
+    },
+    extension: {
+      mode: state.trafficExtensionFilter.mode,
+      value: state.trafficExtensionFilter.value,
+    },
+  };
+}
+
+function applyTrafficFilterSnapshot(snapshot) {
+  const next = normalizeTrafficFilterSnapshot(snapshot);
+  state.trafficSearch = next.search;
+  state.trafficInScopeOnly = next.inScopeOnly;
+  state.trafficFilters = next.filters;
+  state.trafficExtensionFilter = next.extension;
+  el.trafficSearch.value = state.trafficSearch;
+  el.trafficExtensionMode.value = state.trafficExtensionFilter.mode;
+  el.trafficExtensionText.value = state.trafficExtensionFilter.value;
+}
+
+function normalizeTrafficFilterSnapshot(snapshot) {
+  const raw = snapshot && typeof snapshot === 'object' ? snapshot : {};
+  const filters = raw.filters && typeof raw.filters === 'object' ? raw.filters : {};
+  const extension = raw.extension && typeof raw.extension === 'object' ? raw.extension : {};
+  return {
+    search: String(raw.search || '').slice(0, 400),
+    inScopeOnly: raw.inScopeOnly === true,
+    filters: {
+      method: Array.isArray(filters.method) ? filters.method.map(String).filter(Boolean) : [],
+      status: Array.isArray(filters.status) ? filters.status.map(String).filter(Boolean) : [],
+      host: Array.isArray(filters.host) ? filters.host.map(String).filter(Boolean) : [],
+    },
+    extension: {
+      mode: ['off', 'include', 'exclude'].includes(extension.mode) ? extension.mode : 'off',
+      value: String(extension.value || '').slice(0, 400),
+    },
+  };
+}
+
+function sanitizeTrafficPresets(presets) {
+  return Array.isArray(presets)
+    ? presets
+        .map((preset) => ({
+          id: String(preset.id || '').replace(/[^a-zA-Z0-9:_-]/g, '').slice(0, 120),
+          name: String(preset.name || '').slice(0, 80),
+          filter: normalizeTrafficFilterSnapshot(preset.filter),
+        }))
+        .filter((preset) => preset.id && preset.name)
+    : [];
 }
 
 function uniqueSorted(values) {
@@ -674,8 +1286,13 @@ function resetTrafficFilters() {
     host: [],
   };
   state.trafficInScopeOnly = false;
+  state.trafficExtensionFilter = { mode: 'off', value: '' };
+  state.selectedTrafficPreset = '';
   state.openTrafficFilter = '';
   el.trafficSearch.value = '';
+  el.trafficExtensionMode.value = 'off';
+  el.trafficExtensionText.value = '';
+  resetTrafficVirtualScroll();
   renderTraffic();
 }
 
@@ -683,6 +1300,8 @@ function handleTrafficCheckboxFilterChange(event) {
   const scopeInput = event.target.closest('#trafficInScopeOnly');
   if (scopeInput) {
     state.trafficInScopeOnly = scopeInput.checked;
+    state.selectedTrafficPreset = '';
+    resetTrafficVirtualScroll();
     renderTraffic();
     return;
   }
@@ -698,6 +1317,8 @@ function handleTrafficCheckboxFilterChange(event) {
   }
   state.trafficFilters[key] = [...values];
   state.openTrafficFilter = key;
+  state.selectedTrafficPreset = '';
+  resetTrafficVirtualScroll();
   renderTraffic();
 }
 
@@ -713,6 +1334,7 @@ function closeEchoGroupListOnOutside(event) {
   if (!state.selectedEchoGroupId) return;
   if (event.target.closest('.echo-group-list, .echo-group-tab')) return;
   state.selectedEchoGroupId = null;
+  schedulePersistEchoState();
   renderEcho();
 }
 
@@ -799,47 +1421,74 @@ function scheduleSiteMapLoad() {
   }, 150);
 }
 
+async function loadFindings() {
+  state.findings = await api('/api/findings');
+  renderFindings();
+  renderMeta();
+}
+
+function scheduleFindingsLoad() {
+  clearTimeout(findingsLoadTimer);
+  findingsLoadTimer = setTimeout(() => {
+    loadFindings().catch(console.error);
+  }, 180);
+}
+
 async function refreshHistoryAndSiteMap() {
-  const [history, siteMap] = await Promise.all([api('/api/history'), api('/api/site-map')]);
+  const [history, siteMap, findings] = await Promise.all([api('/api/history'), api('/api/site-map'), api('/api/findings')]);
   state.history = history;
   state.siteMap = siteMap;
+  state.findings = findings;
 }
 
 function renderSiteMap() {
   const hosts = filteredSiteMapHosts();
+  const previousHost = state.selectedSiteHost;
   if (!hosts.some((host) => host.host === state.selectedSiteHost)) {
     state.selectedSiteHost = hosts[0]?.host || null;
+  }
+  if (previousHost !== state.selectedSiteHost) {
+    resetSitePathVirtualScroll();
   }
 
   el.siteMapInScopeOnly.checked = state.siteMapInScopeOnly;
   el.siteMapCount.textContent = `${hosts.length} ${hosts.length === 1 ? 'host' : 'hosts'}`;
-  el.siteHostsList.innerHTML =
-    hosts
-      .map(
-        (host) => `
-          <button class="site-host-item ${host.host === state.selectedSiteHost ? 'active' : ''}" type="button" data-site-host="${escapeHtml(host.host)}">
-            <span class="site-main-line">
-              <span class="site-host-name" title="${escapeHtml(host.host)}">${escapeHtml(host.host)}</span>
-              <span class="scope-chip ${host.inScope ? 'in-scope' : 'out-scope'}">${host.inScope ? 'in' : 'out'}</span>
-            </span>
-            <span class="site-meta-line">
-              <span>${escapeHtml(String(host.requestCount))} requests</span>
-              <span>${escapeHtml((host.methods || []).join(', ') || '-')}</span>
-            </span>
-          </button>
-        `,
-      )
-      .join('') || '<div class="empty-state">No hosts captured</div>';
-
-  el.siteHostsList.querySelectorAll('[data-site-host]').forEach((button) => {
-    button.addEventListener('click', () => {
-      state.selectedSiteHost = button.dataset.siteHost;
-      renderSiteMap();
-    });
-  });
+  state.visibleSiteHosts = hosts;
+  renderVirtualSiteHosts(hosts);
 
   const selectedHost = hosts.find((host) => host.host === state.selectedSiteHost);
   renderSitePaths(selectedHost);
+}
+
+function renderVirtualSiteHosts(hosts) {
+  if (hosts.length === 0) {
+    el.siteHostsList.innerHTML = '<div class="empty-state">No hosts captured</div>';
+    return;
+  }
+
+  const window = virtualWindow(el.siteHostsList, state.virtual.siteHosts, hosts.length, SITE_HOST_ROW_HEIGHT);
+  el.siteHostsList.innerHTML = renderVirtualList(
+    hosts.slice(window.start, window.end).map(renderSiteHostItem).join(''),
+    window.total,
+    window.top,
+  );
+}
+
+function renderSiteHostItem(host) {
+  const flowIds = siteHostFlowIds(host);
+  return `
+    <button class="site-host-item ${host.host === state.selectedSiteHost ? 'active' : ''}" type="button" data-site-context="host" data-site-host="${escapeHtml(host.host)}" data-site-scheme="${escapeHtml(host.scheme || 'http')}" data-flow-count="${escapeHtml(String(flowIds.length))}">
+      <span class="site-main-line">
+        <span class="site-host-name" title="${escapeHtml(host.host)}">${escapeHtml(host.host)}</span>
+        <span class="scope-chip ${host.inScope ? 'in-scope' : 'out-scope'}">${host.inScope ? 'in' : 'out'}</span>
+      </span>
+      <span class="site-meta-line">
+        <span>${escapeHtml(String(host.requestCount))} reqs</span>
+        <span>${escapeHtml((host.methods || []).join(', ') || '-')}</span>
+        <span>${escapeHtml((host.statuses || []).join(', ') || '-')}</span>
+      </span>
+    </button>
+  `;
 }
 
 function renderSitePaths(host) {
@@ -852,17 +1501,94 @@ function renderSitePaths(host) {
 
   const paths = filteredSitePaths(host);
   el.sitePathsTitle.textContent = host.host;
-  el.sitePathsSubtitle.textContent = `${paths.length} ${paths.length === 1 ? 'path' : 'paths'} · ${host.requestCount} requests`;
-  el.sitePathsList.innerHTML = paths.length
-    ? `<div class="site-tree">${renderSiteTree(buildSiteTree(paths))}</div>`
-    : '<div class="empty-state">No paths match this filter</div>';
+  el.sitePathsSubtitle.textContent = `${paths.length} ${paths.length === 1 ? 'path' : 'paths'} · ${host.requestCount} reqs`;
+  if (paths.length === 0) {
+    state.visibleSitePathItems = [];
+    el.sitePathsList.innerHTML = '<div class="empty-state">No paths match this filter</div>';
+    return;
+  }
 
-  el.sitePathsList.querySelectorAll('[data-flow-id]').forEach((button) => {
+  state.visibleSitePathItems = flattenSiteTree(buildSiteTree(paths), host);
+  renderVirtualSitePathItems(state.visibleSitePathItems);
+}
+
+function renderVirtualSitePathItems(items) {
+  if (items.length === 0) {
+    el.sitePathsList.innerHTML = '<div class="empty-state">No paths match this filter</div>';
+    return;
+  }
+
+  const window = virtualWindow(el.sitePathsList, state.virtual.sitePaths, items.length, SITE_TREE_ROW_HEIGHT);
+  el.sitePathsList.innerHTML = renderVirtualList(
+    items.slice(window.start, window.end).map(renderSiteTreeItem).join(''),
+    window.total,
+    window.top,
+    'site-tree virtual-list-window',
+  );
+}
+
+function renderFindings() {
+  if (!el.findingsList) return;
+  const findings = filteredFindings();
+  el.findingsSeverityFilter.value = state.findingsSeverity;
+  el.findingsSubtitle.textContent = `${findings.length} shown of ${state.findings.length} passive findings`;
+  el.findingsList.innerHTML =
+    findings
+      .map(
+        (finding) => `
+          <article class="finding-card finding-${escapeHtml(finding.severity)}">
+            <div class="finding-main">
+              <span class="severity-pill severity-${escapeHtml(finding.severity)}">${escapeHtml(finding.severity)}</span>
+              <div>
+                <h3>${escapeHtml(finding.title)}</h3>
+                <p>${escapeHtml(finding.description)}</p>
+              </div>
+            </div>
+            <div class="finding-meta">
+              <span title="${escapeHtml(finding.host || '')}">${escapeHtml(finding.host || '-')}</span>
+              <span title="${escapeHtml(finding.path || '')}">${escapeHtml(finding.path || '/')}</span>
+              <span>${escapeHtml(String(finding.count || 1))} hits</span>
+              <span>${escapeHtml(timeAgo(finding.lastSeenAt || Date.now()))}</span>
+            </div>
+            <div class="finding-evidence">
+              ${(finding.evidence || []).map((item) => `<code>${escapeHtml(item)}</code>`).join('')}
+            </div>
+            <div class="finding-actions">
+              ${(finding.flowIds || [])
+                .slice(0, 5)
+                .map((flowId) => `<button class="button ghost compact-button" type="button" data-finding-flow-id="${escapeHtml(flowId)}">#${escapeHtml(flowId)}</button>`)
+                .join('')}
+            </div>
+          </article>
+        `,
+      )
+      .join('') || '<div class="empty-state">No findings match current filters</div>';
+
+  el.findingsList.querySelectorAll('[data-finding-flow-id]').forEach((button) => {
     button.addEventListener('click', async () => {
-      if (!button.dataset.flowId) return;
-      await loadFlow(button.dataset.flowId);
+      await loadFlow(button.dataset.findingFlowId);
       setView('traffic');
     });
+  });
+}
+
+function filteredFindings() {
+  const query = state.findingsSearch;
+  return state.findings.filter((finding) => {
+    if (state.findingsSeverity && finding.severity !== state.findingsSeverity) return false;
+    if (!query) return true;
+    const haystack = [
+      finding.severity,
+      finding.title,
+      finding.description,
+      finding.host,
+      finding.path,
+      finding.url,
+      ...(finding.evidence || []),
+    ]
+      .join(' ')
+      .toLowerCase();
+    return haystack.includes(query);
   });
 }
 
@@ -924,12 +1650,13 @@ function renderSiteTreeNode(node) {
   `;
 }
 
-function renderSiteTreeLeaf(path) {
+function renderSiteTreeLeaf(path, depth = 0, host = null) {
   const latestFlowId = path.flowIds?.[0] || '';
   const echoAttr = latestFlowId && path.path !== '(CONNECT tunnel)' ? `data-echo-flow-id="${escapeHtml(latestFlowId)}"` : '';
   const leafName = path.path === '(CONNECT tunnel)' ? path.path : siteLeafName(path.path);
+  const hostAttr = host?.host ? `data-site-host="${escapeHtml(host.host)}" data-site-scheme="${escapeHtml(host.scheme || 'http')}"` : '';
   return `
-    <button class="site-tree-leaf site-path-item" type="button" data-flow-id="${escapeHtml(latestFlowId)}" ${echoAttr}>
+    <button class="site-tree-row site-tree-leaf site-path-item" type="button" data-site-context="leaf" ${hostAttr} data-site-path="${escapeHtml(path.path)}" data-flow-id="${escapeHtml(latestFlowId)}" ${echoAttr} style="--site-depth:${depth}">
       <span class="site-main-line">
         <span class="site-path-name" title="${escapeHtml(path.path)}">${escapeHtml(leafName)}</span>
         <span class="scope-chip ${path.inScope ? 'in-scope' : 'out-scope'}">${path.inScope ? 'in scope' : 'out'}</span>
@@ -959,6 +1686,126 @@ function countSiteTreeLeaves(node) {
   return count;
 }
 
+function siteTreeNodeMeta(node) {
+  const methods = new Set();
+  const statuses = new Set();
+  const flowIds = [];
+  let endpointCount = 0;
+  let hitCount = 0;
+  let inScope = false;
+
+  for (const path of node.leaves) {
+    endpointCount += 1;
+    hitCount += Number(path.count || 0);
+    inScope = inScope || Boolean(path.inScope);
+    (path.methods || []).forEach((method) => methods.add(method));
+    (path.statuses || []).forEach((status) => statuses.add(status));
+    flowIds.push(...(path.flowIds || []));
+  }
+
+  for (const child of node.children.values()) {
+    const childMeta = siteTreeNodeMeta(child);
+    endpointCount += childMeta.endpointCount;
+    hitCount += childMeta.hitCount;
+    inScope = inScope || childMeta.inScope;
+    childMeta.methods.forEach((method) => methods.add(method));
+    childMeta.statuses.forEach((status) => statuses.add(status));
+    flowIds.push(...childMeta.flowIds);
+  }
+
+  return {
+    endpointCount,
+    hitCount,
+    inScope,
+    methods: [...methods].sort(),
+    statuses: sortStatusValues([...statuses]),
+    flowIds: uniqueFlowIds(flowIds),
+  };
+}
+
+function flattenSiteTree(root, host) {
+  const items = [];
+  const hostName = host?.host || String(host || '');
+  const hostScheme = host?.scheme || 'http';
+
+  const walk = (node, depth, parts) => {
+    const children = [...node.children.values()].sort((a, b) => a.name.localeCompare(b.name));
+    for (const child of children) {
+      const childParts = [...parts, child.name];
+      const id = `${hostName}:${childParts.join('/')}`;
+      const collapsed = state.siteCollapsedNodes.has(id);
+      const meta = siteTreeNodeMeta(child);
+      items.push({
+        id,
+        type: 'folder',
+        host: hostName,
+        scheme: hostScheme,
+        name: child.name,
+        pathPrefix: `/${childParts.join('/')}`,
+        depth,
+        count: meta.endpointCount,
+        hitCount: meta.hitCount,
+        inScope: meta.inScope,
+        methods: meta.methods,
+        statuses: meta.statuses,
+        flowIds: meta.flowIds,
+        collapsed,
+      });
+      if (!collapsed) {
+        walk(child, depth + 1, childParts);
+      }
+    }
+
+    for (const path of node.leaves) {
+      items.push({
+        id: `${hostName}:${path.path}`,
+        type: 'leaf',
+        host: hostName,
+        scheme: hostScheme,
+        path,
+        depth,
+      });
+    }
+  };
+
+  walk(root, 0, []);
+  return items;
+}
+
+function renderSiteTreeItem(item) {
+  if (item.type === 'folder') {
+    return `
+      <button class="site-tree-row site-tree-folder-row" type="button" data-site-context="folder" data-site-node-id="${escapeHtml(item.id)}" data-site-host="${escapeHtml(item.host)}" data-site-scheme="${escapeHtml(item.scheme)}" data-site-path-prefix="${escapeHtml(item.pathPrefix)}" style="--site-depth:${item.depth}">
+        <span class="site-main-line">
+          <span class="site-folder-title">
+            <span class="site-tree-folder ${item.collapsed ? '' : 'open'}">▸</span>
+            <span class="site-tree-name" title="${escapeHtml(item.pathPrefix)}">${escapeHtml(item.name)}</span>
+          </span>
+          <span class="site-tree-count">${escapeHtml(String(item.count))} endpoints</span>
+        </span>
+        <span class="site-meta-line">
+          <span>${escapeHtml((item.methods || []).join(', ') || '-')}</span>
+          <span>${escapeHtml((item.statuses || []).join(', ') || '-')}</span>
+          <span>${escapeHtml(String(item.hitCount || 0))} hits</span>
+        </span>
+      </button>
+    `;
+  }
+
+  return renderSiteTreeLeaf(item.path, item.depth, { host: item.host, scheme: item.scheme });
+}
+
+function toggleSiteTreeNode(id) {
+  if (state.siteCollapsedNodes.has(id)) {
+    state.siteCollapsedNodes.delete(id);
+  } else {
+    state.siteCollapsedNodes.add(id);
+  }
+
+  const selectedHost = state.visibleSiteHosts.find((host) => host.host === state.selectedSiteHost);
+  renderSitePaths(selectedHost);
+}
+
 function filteredSiteMapHosts() {
   const query = state.siteMapSearch;
   const inScopeOnly = state.siteMapInScopeOnly;
@@ -984,6 +1831,31 @@ function sitePathSearchText(host, path) {
   return `${host.host} ${path.path} ${path.query || ''} ${path.lastUrl || ''} ${(path.methods || []).join(' ')}`.toLowerCase();
 }
 
+function siteHostByName(hostName) {
+  return (state.siteMap.hosts || []).find((host) => host.host === hostName) || null;
+}
+
+function siteHostFlowIds(host) {
+  return uniqueFlowIds((host?.paths || []).flatMap((path) => path.flowIds || []));
+}
+
+function uniqueFlowIds(flowIds) {
+  return [...new Set((flowIds || []).map((id) => String(id)).filter(Boolean))];
+}
+
+function sortStatusValues(values) {
+  return [...values].sort((a, b) => statusSortRank(a) - statusSortRank(b) || String(a).localeCompare(String(b)));
+}
+
+function statusSortRank(value) {
+  const text = String(value || '');
+  if (/^\d+$/.test(text)) return Number(text);
+  if (text === 'ERR') return 900;
+  if (text === 'TUN') return 901;
+  if (text === '-') return 999;
+  return 950;
+}
+
 function renderEcho() {
   if (!state.echoTabs.some((tab) => tab.id === state.selectedEchoTabId)) {
     state.selectedEchoTabId = state.echoTabs[0]?.id || null;
@@ -998,6 +1870,7 @@ function renderEcho() {
     button.addEventListener('click', () => {
       syncSelectedEchoRequest();
       state.selectedEchoTabId = button.dataset.echoTabId;
+      schedulePersistEchoState();
       renderEcho();
     });
     button.addEventListener('dblclick', (event) => {
@@ -1008,6 +1881,7 @@ function renderEcho() {
   el.echoTabs.querySelectorAll('[data-echo-group-id]').forEach((button) => {
     button.addEventListener('click', () => {
       state.selectedEchoGroupId = state.selectedEchoGroupId === button.dataset.echoGroupId ? null : button.dataset.echoGroupId;
+      schedulePersistEchoState();
       renderEcho();
     });
     button.addEventListener('dblclick', (event) => {
@@ -1123,6 +1997,7 @@ function renderEchoGroupList() {
     button.addEventListener('click', () => {
       syncSelectedEchoRequest();
       state.selectedEchoTabId = button.dataset.echoTabId;
+      schedulePersistEchoState();
       renderEcho();
     });
     button.addEventListener('dblclick', (event) => {
@@ -1234,6 +2109,7 @@ function createEchoGroup() {
   };
   state.echoGroups.push(group);
   state.selectedEchoGroupId = group.id;
+  schedulePersistEchoState();
   renderEcho();
 }
 
@@ -1246,6 +2122,7 @@ function renameEchoTab(tabId) {
   if (!trimmed) return;
   tab.title = trimmed;
   tab.customTitle = true;
+  schedulePersistEchoState();
   renderEcho();
 }
 
@@ -1257,6 +2134,7 @@ function renameEchoGroup(groupId) {
   const trimmed = next.trim();
   if (!trimmed) return;
   group.title = trimmed;
+  schedulePersistEchoState();
   renderEcho();
 }
 
@@ -1270,6 +2148,7 @@ function deleteEchoGroup(groupId) {
   if (state.selectedEchoGroupId === groupId) {
     state.selectedEchoGroupId = null;
   }
+  schedulePersistEchoState();
   renderEcho();
 }
 
@@ -1311,6 +2190,7 @@ function setEchoColor(kind, id, color) {
       : state.echoTabs.find((tab) => tab.id === id);
   if (!item) return;
   item.color = color || '';
+  schedulePersistEchoState();
   renderEcho();
 }
 
@@ -1370,6 +2250,7 @@ function moveEchoTab(tabId, targetTabId, targetGroupId) {
 
   state.echoTabs.splice(insertIndex, 0, tab);
   state.selectedEchoGroupId = tab.groupId || null;
+  schedulePersistEchoState();
   renderEcho();
 }
 
@@ -1387,6 +2268,7 @@ function startEchoPaneResize(event) {
   const onUp = () => {
     window.removeEventListener('mousemove', onMove);
     window.removeEventListener('mouseup', onUp);
+    schedulePersistEchoState();
   };
 
   window.addEventListener('mousemove', onMove);
@@ -1415,6 +2297,7 @@ function createBlankEchoTab() {
   }, 'Manual request');
   state.echoTabs.unshift(tab);
   state.selectedEchoTabId = tab.id;
+  schedulePersistEchoState();
   setView('echo');
   renderEcho();
 }
@@ -1424,6 +2307,7 @@ async function sendFlowToEcho(flowId) {
   const tab = createEchoTab(flow.request, `${flow.request.method} ${requestTarget(flow.request.url)}`, `From flow ${flow.id}`);
   state.echoTabs.unshift(tab);
   state.selectedEchoTabId = tab.id;
+  schedulePersistEchoState();
   setView('echo');
   renderEcho();
 }
@@ -1448,6 +2332,114 @@ function createEchoTab(request, title, source = 'Editable request') {
   };
 }
 
+function serializeEchoState() {
+  return {
+    tabs: state.echoTabs.map((tab) => ({
+      id: tab.id,
+      title: tab.title || '',
+      customTitle: Boolean(tab.customTitle),
+      groupId: tab.groupId || '',
+      source: tab.source || '',
+      method: tab.method || 'GET',
+      rawRequest: tab.rawRequest || '',
+      response: tab.response || null,
+      loading: false,
+      error: tab.loading ? null : tab.error || null,
+      durationMs: tab.durationMs ?? null,
+      color: tab.color || '',
+    })),
+    groups: state.echoGroups.map((group) => ({
+      id: group.id,
+      title: group.title || 'Group',
+      color: group.color || '',
+    })),
+    selectedTabId: state.selectedEchoTabId,
+    selectedGroupId: state.selectedEchoGroupId,
+    split: state.echoSplit,
+  };
+}
+
+function schedulePersistEchoState() {
+  if (!state.echoPersistenceReady) {
+    return;
+  }
+
+  clearTimeout(echoPersistTimer);
+  echoPersistTimer = setTimeout(() => {
+    echoPersistTimer = null;
+    persistEchoState().catch(console.error);
+  }, 300);
+}
+
+async function persistEchoState() {
+  await api('/api/ui-state', {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      echo: serializeEchoState(),
+    }),
+  });
+}
+
+function flushEchoState() {
+  if (!state.echoPersistenceReady) {
+    return;
+  }
+
+  clearTimeout(echoPersistTimer);
+  echoPersistTimer = null;
+  const payload = JSON.stringify({ echo: serializeEchoState() });
+  if (navigator.sendBeacon) {
+    navigator.sendBeacon('/api/ui-state', new Blob([payload], { type: 'application/json' }));
+    return;
+  }
+  fetch('/api/ui-state', {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: payload,
+    keepalive: true,
+  }).catch(console.error);
+}
+
+async function persistTrafficPresets() {
+  state.trafficPersistenceReady = true;
+  await api('/api/ui-state', {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      traffic: serializeTrafficUiState(),
+    }),
+  });
+}
+
+function serializeTrafficUiState() {
+  return {
+    presets: state.trafficPresets.map((preset) => ({
+      id: preset.id,
+      name: preset.name,
+      filter: preset.filter,
+    })),
+  };
+}
+
+function flushTrafficPresets() {
+  if (!state.trafficPersistenceReady) {
+    return;
+  }
+
+  const payload = JSON.stringify({ traffic: serializeTrafficUiState() });
+  if (navigator.sendBeacon) {
+    navigator.sendBeacon('/api/ui-state', new Blob([payload], { type: 'application/json' }));
+    return;
+  }
+  fetch('/api/ui-state', {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: payload,
+    keepalive: true,
+  }).catch(console.error);
+}
+
 function syncSelectedEchoRequest() {
   const tab = selectedEchoTab();
   if (!tab || el.echoWorkspace.classList.contains('hidden')) {
@@ -1462,6 +2454,7 @@ function syncSelectedEchoRequest() {
     el.echoTabName.value = tab.title;
   }
   renderEchoRawRequest();
+  schedulePersistEchoState();
 }
 
 function syncSelectedEchoMeta() {
@@ -1473,6 +2466,7 @@ function syncSelectedEchoMeta() {
   const nextTitle = el.echoTabName.value.trim();
   tab.title = nextTitle || `${tab.method || 'GET'} ${parseRawRequestMeta(tab.rawRequest).target || '/'}`;
   tab.customTitle = Boolean(nextTitle);
+  schedulePersistEchoState();
   renderEcho();
 }
 
@@ -1481,6 +2475,7 @@ function closeEchoTab(tabId) {
   if (state.selectedEchoTabId === tabId) {
     state.selectedEchoTabId = state.echoTabs[0]?.id || null;
   }
+  schedulePersistEchoState();
   renderEcho();
 }
 
@@ -1515,33 +2510,104 @@ async function sendSelectedEchoRequest() {
   } finally {
     tab.loading = false;
   }
+  schedulePersistEchoState();
   renderEcho();
 }
 
 function openEchoContextMenu(event) {
-  const source = event.target.closest('[data-flow-id], [data-echo-flow-id]');
-  const flowId = source?.dataset.flowId || source?.dataset.echoFlowId || '';
-  if (!flowId) {
+  const siteSource = event.target.closest('[data-site-context]');
+  const flowSource = event.target.closest('[data-flow-id], [data-echo-flow-id]');
+  const target = siteSource ? siteContextTarget(siteSource) : flowContextTarget(flowSource);
+  if (!target) {
     closeContextMenu();
     return;
   }
 
   event.preventDefault();
-  const flow = flowSummaryById(flowId);
-  state.contextFlowId = flowId;
-  state.echoContextFlowId = source.dataset.echoFlowId || (flow?.type === 'http' ? flowId : null);
-  el.sendToEchoContextBtn.disabled = flow?.type !== 'http';
-  const inConfiguredScope = Boolean(state.config?.scope?.enabled && flow?.inScope);
+  state.contextTarget = target;
+  state.contextFlowId = target.flowId || target.flowIds?.[0] || null;
+  state.echoContextFlowId = target.echoFlowId || null;
+  el.sendToEchoContextBtn.disabled = !target.echoFlowId;
+  el.showFlowsContextBtn.disabled = !target.flowIds?.length;
+  el.showFlowsContextBtn.classList.toggle('hidden', !target.flowIds?.length);
+  const inConfiguredScope = Boolean(state.config?.scope?.enabled && target.inScope);
   el.addToScopeContextBtn.classList.toggle('hidden', inConfiguredScope);
   el.removeFromScopeContextBtn.classList.toggle('hidden', !inConfiguredScope);
-  el.contextMenu.style.left = `${Math.min(event.clientX, window.innerWidth - 210)}px`;
-  el.contextMenu.style.top = `${Math.min(event.clientY, window.innerHeight - 86)}px`;
+  el.contextMenu.style.left = '0px';
+  el.contextMenu.style.top = '0px';
   el.contextMenu.classList.remove('hidden');
+  const rect = el.contextMenu.getBoundingClientRect();
+  el.contextMenu.style.left = `${Math.max(8, Math.min(event.clientX, window.innerWidth - rect.width - 8))}px`;
+  el.contextMenu.style.top = `${Math.max(8, Math.min(event.clientY, window.innerHeight - rect.height - 8))}px`;
+}
+
+function flowContextTarget(source) {
+  const flowId = source?.dataset.flowId || source?.dataset.echoFlowId || '';
+  if (!flowId) return null;
+
+  const flow = flowSummaryById(flowId);
+  const scopeUrl = flow ? scopeUrlWithoutQuery(flow) : '';
+  return {
+    kind: 'flow',
+    flowId,
+    flowIds: [flowId],
+    echoFlowId: source.dataset.echoFlowId || (flow?.type === 'http' ? flowId : null),
+    inScope: Boolean(flow?.inScope),
+    scopeRule: scopeUrl ? { field: 'url', operator: 'equals', value: scopeUrl } : null,
+  };
+}
+
+function siteContextTarget(source) {
+  const kind = source.dataset.siteContext;
+  const hostName = source.dataset.siteHost || state.selectedSiteHost || '';
+  const host = siteHostByName(hostName);
+  const scheme = source.dataset.siteScheme || host?.scheme || 'http';
+
+  if (kind === 'host') {
+    const flowIds = siteHostFlowIds(host);
+    return {
+      kind,
+      flowIds,
+      echoFlowId: firstEchoableFlowId(flowIds),
+      inScope: Boolean(host?.inScope),
+      scopeRule: hostName ? { field: 'host', operator: 'equals', value: hostName } : null,
+    };
+  }
+
+  if (kind === 'folder') {
+    const item = state.visibleSitePathItems.find((candidate) => candidate.id === source.dataset.siteNodeId);
+    const pathPrefix = item?.pathPrefix || source.dataset.sitePathPrefix || '/';
+    const flowIds = uniqueFlowIds(item?.flowIds || []);
+    return {
+      kind,
+      flowIds,
+      echoFlowId: firstEchoableFlowId(flowIds),
+      inScope: Boolean(item?.inScope),
+      scopeRule: siteFolderScopeRule(hostName, scheme, pathPrefix),
+    };
+  }
+
+  if (kind === 'leaf') {
+    const pathValue = source.dataset.sitePath || '';
+    const path = (host?.paths || []).find((candidate) => candidate.path === pathValue);
+    const flowIds = uniqueFlowIds(path?.flowIds || [source.dataset.flowId]);
+    return {
+      kind,
+      flowId: source.dataset.flowId || flowIds[0] || null,
+      flowIds,
+      echoFlowId: firstEchoableFlowId(flowIds),
+      inScope: Boolean(path?.inScope),
+      scopeRule: siteLeafScopeRule(hostName, scheme, path),
+    };
+  }
+
+  return null;
 }
 
 function closeContextMenu() {
   state.contextFlowId = null;
   state.echoContextFlowId = null;
+  state.contextTarget = null;
   el.contextMenu.classList.add('hidden');
 }
 
@@ -1553,29 +2619,32 @@ function flowSummaryById(flowId) {
 }
 
 async function applyScopeFromContext(action) {
+  const target = state.contextTarget;
   const flowId = state.contextFlowId;
   closeContextMenu();
-  if (!flowId) {
-    return;
+  let scopeRule = target?.scopeRule || null;
+  if (!scopeRule && flowId) {
+    const flow = flowSummaryById(flowId) || (await api(`/api/history/${encodeURIComponent(flowId)}`));
+    const scopeUrl = scopeUrlWithoutQuery(flow);
+    if (scopeUrl) {
+      scopeRule = { field: 'url', operator: 'equals', value: scopeUrl };
+    }
   }
-
-  const flow = flowSummaryById(flowId) || (await api(`/api/history/${encodeURIComponent(flowId)}`));
-  const scopeUrl = scopeUrlWithoutQuery(flow);
-  if (!scopeUrl) {
+  if (!scopeRule?.value) {
     return;
   }
 
   const scope = state.config?.scope || { enabled: false, rules: [] };
   const rules = (scope.rules || []).filter(
-    (rule) => !(rule.field === 'url' && rule.operator === 'equals' && rule.value === scopeUrl),
+    (rule) => !(rule.field === scopeRule.field && rule.operator === scopeRule.operator && rule.value === scopeRule.value),
   );
   rules.push({
     id: `scope-context-${Date.now()}`,
     enabled: true,
     action,
-    field: 'url',
-    operator: 'equals',
-    value: scopeUrl,
+    field: scopeRule.field,
+    operator: scopeRule.operator,
+    value: scopeRule.value,
   });
 
   await patchConfig({
@@ -1595,16 +2664,133 @@ function scopeUrlWithoutQuery(flow) {
   return `${parsed.origin}${parsed.pathname || '/'}`;
 }
 
+function siteFolderScopeRule(hostName, scheme, pathPrefix) {
+  if (!hostName) return null;
+  const normalizedPrefix = normalizeSitePathPrefix(pathPrefix);
+  if (!normalizedPrefix || normalizedPrefix === '/') {
+    return { field: 'host', operator: 'equals', value: hostName };
+  }
+
+  return {
+    field: 'url',
+    operator: 'regex',
+    value: `^${escapeRegExp(siteOrigin(scheme, hostName))}${escapeRegExp(normalizedPrefix)}(?:/|$)`,
+  };
+}
+
+function siteLeafScopeRule(hostName, scheme, path) {
+  if (!hostName || !path) return null;
+  if (path.path === '(CONNECT tunnel)') {
+    return { field: 'host', operator: 'equals', value: hostName };
+  }
+  const fallbackUrl = `${siteOrigin(scheme, hostName)}${normalizeSitePathPrefix(path.path || '/')}`;
+  const value = scopeUrlWithoutQuery({ url: path.lastUrl || fallbackUrl });
+  return value ? { field: 'url', operator: 'equals', value } : null;
+}
+
+function siteOrigin(scheme, hostName) {
+  return `${scheme || 'http'}://${hostName}`;
+}
+
+function normalizeSitePathPrefix(path) {
+  const value = String(path || '/');
+  return value.startsWith('/') ? value : `/${value}`;
+}
+
+function firstEchoableFlowId(flowIds) {
+  return uniqueFlowIds(flowIds).find((flowId) => flowSummaryById(flowId)?.type === 'http') || null;
+}
+
+function escapeRegExp(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function showContextFlows() {
+  const flowIds = uniqueFlowIds(state.contextTarget?.flowIds || (state.contextFlowId ? [state.contextFlowId] : []));
+  closeContextMenu();
+  if (flowIds.length === 0) return;
+
+  state.trafficSearch = `flow:${flowIds.join(',')}`;
+  state.trafficFilters = {
+    method: [],
+    status: [],
+    host: [],
+  };
+  state.trafficInScopeOnly = false;
+  state.trafficExtensionFilter = { mode: 'off', value: '' };
+  state.selectedTrafficPreset = '';
+  state.openTrafficFilter = '';
+  el.trafficSearch.value = state.trafficSearch;
+  el.trafficExtensionMode.value = 'off';
+  el.trafficExtensionText.value = '';
+  resetTrafficVirtualScroll();
+  setView('traffic');
+  renderTraffic();
+}
+
 function filteredHistory() {
   return trafficHistory().filter((flow) => {
     if (state.trafficFilters.method.length > 0 && !state.trafficFilters.method.includes(flow.method)) return false;
     if (state.trafficFilters.host.length > 0 && !state.trafficFilters.host.includes(flow.host)) return false;
     if (state.trafficInScopeOnly && !flow.inScope) return false;
+    if (!matchesExtensionFilter(flow)) return false;
     if (!matchesStatusFilters(flow)) return false;
-    if (!state.trafficSearch) return true;
-    const haystack = `${flow.id} ${flow.method} ${flow.host} ${flow.url} ${flow.statusCode || ''} ${flow.inScope ? 'in scope' : 'out scope'}`.toLowerCase();
-    return haystack.includes(state.trafficSearch);
+    return matchesTrafficSearch(flow);
   }).sort(compareTrafficFlows);
+}
+
+function matchesTrafficSearch(flow) {
+  if (!state.trafficSearch) return true;
+  const flowSearchIds = flowSearchIdSet(state.trafficSearch);
+  if (flowSearchIds) {
+    return flowSearchIds.has(String(flow.id));
+  }
+
+  const haystack = `${flow.id} ${flow.method} ${flow.host} ${flow.url} ${flow.statusCode || ''} ${flow.inScope ? 'in scope' : 'out scope'}`.toLowerCase();
+  const terms = state.trafficSearch
+    .split(',')
+    .map((term) => term.trim().toLowerCase())
+    .filter(Boolean);
+  if (terms.length > 1) {
+    return terms.some((term) => haystack.includes(term));
+  }
+  return haystack.includes(state.trafficSearch);
+}
+
+function flowSearchIdSet(query) {
+  const text = String(query || '').trim().toLowerCase();
+  if (!text.startsWith('flow:')) return null;
+  const ids = text
+    .slice(5)
+    .split(/[,\s]+/)
+    .map((item) => item.replace(/^#/, '').trim())
+    .filter(Boolean);
+  return ids.length ? new Set(ids) : new Set();
+}
+
+function matchesExtensionFilter(flow) {
+  const mode = state.trafficExtensionFilter.mode;
+  if (mode === 'off') return true;
+  const extensions = parseExtensionFilter(state.trafficExtensionFilter.value);
+  if (extensions.length === 0) return true;
+  const extension = flowExtension(flow);
+  if (mode === 'include') return extension && extensions.includes(extension);
+  if (mode === 'exclude') return !extension || !extensions.includes(extension);
+  return true;
+}
+
+function parseExtensionFilter(value) {
+  return String(value || '')
+    .split(/[,\s]+/)
+    .map((item) => item.trim().replace(/^\./, '').toLowerCase())
+    .filter(Boolean);
+}
+
+function flowExtension(flow) {
+  const pathname = safeUrl(flow.url)?.pathname || flow.path || '';
+  const filename = pathname.split('/').pop() || '';
+  const match = filename.match(/\.([a-z0-9][a-z0-9_-]{0,24})$/i);
+  return match ? match[1].toLowerCase() : '';
 }
 
 function trafficHistory() {
@@ -2468,7 +3654,7 @@ function ruleValuePlaceholder(field) {
 }
 
 function addInterceptRule() {
-  const rules = [...(state.config?.intercept?.rules || [])];
+  const rules = interceptRulesWithVisibleDraft();
   rules.push({
     id: `rule-${Date.now()}`,
     enabled: true,
@@ -2482,13 +3668,32 @@ function addInterceptRule() {
 }
 
 function deleteInterceptRule(id) {
-  const rules = (state.config?.intercept?.rules || []).filter((rule) => rule.id !== id);
+  const rules = interceptRulesWithVisibleDraft().filter((rule) => rule.id !== id);
   patchConfig({ intercept: { rules } });
 }
 
 function saveInterceptRules() {
   const stage = state.rulesModalStage;
-  const editedRules = [...el.rulesList.querySelectorAll('.rule-row')].map((row) => ({
+  const editedRules = readInterceptRuleRows(stage);
+  const preservedRules = (state.config?.intercept?.rules || []).filter((rule) => rule.stage !== stage && rule.stage !== 'both');
+
+  patchConfig({ intercept: { rules: [...preservedRules, ...editedRules] } }).then(closeRulesModal);
+}
+
+function interceptRulesWithVisibleDraft() {
+  const allRules = state.config?.intercept?.rules || [];
+  if (el.rulesModal.classList.contains('hidden')) {
+    return [...allRules];
+  }
+
+  const stage = state.rulesModalStage;
+  const editedRules = readInterceptRuleRows(stage);
+  const preservedRules = allRules.filter((rule) => rule.stage !== stage && rule.stage !== 'both');
+  return [...preservedRules, ...editedRules];
+}
+
+function readInterceptRuleRows(stage = state.rulesModalStage) {
+  return [...el.rulesList.querySelectorAll('.rule-row')].map((row) => ({
     id: row.dataset.ruleId,
     enabled: row.querySelector('[data-rule-field="enabled"]').checked,
     stage,
@@ -2497,9 +3702,6 @@ function saveInterceptRules() {
     headerName: row.querySelector('[data-rule-field="headerName"]').value.trim(),
     value: row.querySelector('[data-rule-field="value"]').value,
   }));
-  const preservedRules = (state.config?.intercept?.rules || []).filter((rule) => rule.stage !== stage && rule.stage !== 'both');
-
-  patchConfig({ intercept: { rules: [...preservedRules, ...editedRules] } }).then(closeRulesModal);
 }
 
 function openRulesModal(stage) {
@@ -2513,6 +3715,7 @@ function closeRulesModal() {
 }
 
 async function saveProxyConfig() {
+  syncProxyDraftFromDom();
   const port = Number(el.proxyPort.value);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     el.proxySaveStatus.textContent = 'Port must be between 1 and 65535.';
@@ -2521,11 +3724,78 @@ async function saveProxyConfig() {
 
   el.proxySaveStatus.textContent = 'Rebinding proxy listener...';
   try {
-    await patchConfig({ proxyPort: port });
+    await patchConfig({ proxyHost: state.config.proxyHost, proxyPort: port });
     el.proxySaveStatus.textContent = `Listening on ${state.config.proxyHost}:${state.config.proxyPort}.`;
   } catch (error) {
     el.proxySaveStatus.textContent = `Could not bind port: ${formatError(error)}`;
     renderConfig();
+  }
+}
+
+async function exportProject() {
+  flushEchoState();
+  el.projectActionStatus.textContent = 'Preparing project export...';
+
+  try {
+    const response = await fetch('/api/project/export');
+    if (!response.ok) {
+      throw new Error(await response.text());
+    }
+    const blob = await response.blob();
+    const filename = downloadFilename(response.headers.get('content-disposition')) || `${state.project?.name || 'veil-project'}.json`;
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    el.projectActionStatus.textContent = `Exported ${filename}.`;
+  } catch (error) {
+    el.projectActionStatus.textContent = `Export failed: ${formatError(error)}`;
+  }
+}
+
+async function importSelectedProject() {
+  const file = el.importProjectInput.files?.[0];
+  if (!file) return;
+
+  el.projectActionStatus.textContent = `Importing ${file.name}...`;
+  try {
+    const text = await file.text();
+    const payload = await api('/api/project/import', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: text,
+    });
+    state.selectedFlowId = null;
+    state.selectedFlow = null;
+    applyState(payload, true);
+    await Promise.all([loadSiteMap(), loadFindings()]);
+    el.projectActionStatus.textContent = `Imported ${file.name}.`;
+  } catch (error) {
+    el.projectActionStatus.textContent = `Import failed: ${formatError(error)}`;
+  } finally {
+    el.importProjectInput.value = '';
+  }
+}
+
+async function clearHistory() {
+  if (!window.confirm('Clear all captured traffic from this project? Echo tabs and config will stay intact.')) {
+    return;
+  }
+
+  el.projectActionStatus.textContent = 'Clearing captured traffic...';
+  try {
+    const payload = await api('/api/history', { method: 'DELETE' });
+    state.selectedFlowId = null;
+    state.selectedFlow = null;
+    applyState(payload, false);
+    await Promise.all([loadSiteMap(), loadFindings()]);
+    el.projectActionStatus.textContent = 'Captured traffic cleared.';
+  } catch (error) {
+    el.projectActionStatus.textContent = `Clear failed: ${formatError(error)}`;
   }
 }
 
@@ -2548,18 +3818,28 @@ function renderScopeRuleList(container, rules, action) {
   const label = action === 'include' ? 'include' : 'exclude';
   container.innerHTML =
     rules
-      .map(
-        (rule) => `
-          <div class="rule-row scope-rule-row scope-rule-${escapeHtml(action)}" data-scope-rule-id="${escapeHtml(rule.id)}">
+      .map((rule) => {
+        const preset = scopeRulePreset(rule);
+        return `
+          <div class="rule-row scope-rule-row scope-rule-${escapeHtml(action)} ${preset === 'custom' ? 'scope-custom-rule' : ''}" data-scope-rule-id="${escapeHtml(rule.id)}" data-scope-action="${escapeHtml(action)}">
             <div class="rule-row-top">
               <label class="rule-enabled">
                 <input type="checkbox" data-scope-field="enabled" ${rule.enabled === false ? '' : 'checked'} />
                 <span>Enabled</span>
               </label>
-              <button class="button ghost compact-button" type="button" data-delete-scope-rule="${escapeHtml(rule.id)}">Delete</button>
+              <div class="scope-rule-actions">
+                <span class="scope-match-count" data-scope-match-count>0 matches</span>
+                <button class="button ghost compact-button" type="button" data-delete-scope-rule="${escapeHtml(rule.id)}">Delete</button>
+              </div>
             </div>
             <div class="rule-grid">
               <label>
+                Type
+                <select data-scope-field="preset">
+                  ${scopePresetOptions(preset)}
+                </select>
+              </label>
+              <label class="scope-advanced-field">
                 Field
                 <select data-scope-field="field">
                   ${ruleOption('url', 'URL', rule.field)}
@@ -2568,7 +3848,7 @@ function renderScopeRuleList(container, rules, action) {
                   ${ruleOption('method', 'Method', rule.field)}
                 </select>
               </label>
-              <label>
+              <label class="scope-advanced-operator">
                 Operator
                 <select data-scope-field="operator">
                   ${ruleOption('contains', 'Contains', rule.operator)}
@@ -2577,16 +3857,18 @@ function renderScopeRuleList(container, rules, action) {
                   ${ruleOption('endsWith', 'Ends with', rule.operator)}
                   ${ruleOption('regex', 'Regex', rule.operator)}
                   ${ruleOption('exists', 'Exists', rule.operator)}
+                  ${ruleOption('domain', 'Domain', rule.operator)}
+                  ${ruleOption('domainSubdomains', 'Domain + subdomains', rule.operator)}
                 </select>
               </label>
               <label class="rule-value">
                 Value
-                <input data-scope-field="value" type="text" value="${escapeHtml(rule.value || '')}" placeholder="${escapeHtml(scopeValuePlaceholder(rule.field))}" />
+                <input data-scope-field="value" type="text" value="${escapeHtml(rule.value || '')}" placeholder="${escapeHtml(scopeValuePlaceholder(rule.field, preset))}" />
               </label>
             </div>
           </div>
-        `,
-      )
+        `;
+      })
       .join('') || `<div class="message-empty">No ${label} rules configured.</div>`;
   container.querySelectorAll('.rule-row').forEach(updateScopeRuleRow);
 }
@@ -2596,20 +3878,92 @@ function updateScopeRuleRow(row) {
     return;
   }
 
+  const preset = row.querySelector('[data-scope-field="preset"]')?.value || 'custom';
   const field = row.querySelector('[data-scope-field="field"]').value;
   const valueInput = row.querySelector('[data-scope-field="value"]');
-  valueInput.placeholder = scopeValuePlaceholder(field);
+  row.classList.toggle('scope-custom-rule', preset === 'custom');
+  valueInput.placeholder = scopeValuePlaceholder(field, preset);
+  updateScopeRuleMatchCount(row);
 }
 
-function scopeValuePlaceholder(field) {
+function scopePresetOptions(current) {
+  return Object.entries(SCOPE_PRESETS)
+    .map(([value, preset]) => ruleOption(value, preset.label, current))
+    .join('');
+}
+
+function scopeRulePreset(rule) {
+  if (rule.field === 'host' && rule.operator === 'domain') return 'domain';
+  if (rule.field === 'host' && rule.operator === 'domainSubdomains') return 'domain-subdomains';
+  if (rule.field === 'url' && rule.operator === 'equals') return 'exact-url';
+  if (rule.field === 'path' && rule.operator === 'startsWith') return 'path-prefix';
+  if (rule.field === 'url' && rule.operator === 'regex') return 'regex';
+  return 'custom';
+}
+
+function setScopePreset(row, preset) {
+  const presetSelect = row?.querySelector('[data-scope-field="preset"]');
+  if (presetSelect) {
+    presetSelect.value = preset;
+  }
+}
+
+function applyScopePreset(row, preset) {
+  if (!row) return;
+  const config = SCOPE_PRESETS[preset] || SCOPE_PRESETS.custom;
+  const fieldSelect = row.querySelector('[data-scope-field="field"]');
+  const operatorSelect = row.querySelector('[data-scope-field="operator"]');
+  const valueInput = row.querySelector('[data-scope-field="value"]');
+
+  if (preset !== 'custom') {
+    fieldSelect.value = config.field;
+    operatorSelect.value = config.operator;
+    valueInput.value = normalizeScopeValueForPreset(valueInput.value, preset);
+  }
+
+  updateScopeRuleRow(row);
+}
+
+function normalizeScopeValueForPreset(value, preset) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  if (preset === 'domain' || preset === 'domain-subdomains') return normalizeScopeDomain(text);
+  if (preset === 'exact-url') return stripUrlQuery(text);
+  if (preset === 'path-prefix') return normalizeScopePath(text);
+  return text;
+}
+
+function scopeValuePlaceholder(field, preset = 'custom') {
+  if (preset === 'domain') return 'example.com';
+  if (preset === 'domain-subdomains') return 'example.com';
+  if (preset === 'exact-url') return 'https://example.com/api/items';
+  if (preset === 'path-prefix') return '/api/';
+  if (preset === 'regex') return '/api/(users|admin)';
   if (field === 'url') return 'https://target.test/api, /admin';
-  if (field === 'host') return 'juice-shop.proxmox.hvn';
+  if (field === 'host') return '';
   if (field === 'path') return '/rest, /login, /assets';
   if (field === 'method') return 'GET, POST, PUT';
   return 'Value to match';
 }
 
+function updateScopeMatchCounts() {
+  document.querySelectorAll('.scope-rule-row').forEach(updateScopeRuleMatchCount);
+}
+
+function updateScopeRuleMatchCount(row) {
+  const badge = row?.querySelector('[data-scope-match-count]');
+  if (!badge) return;
+  const rule = readScopeRuleRow(row);
+  if (!rule.enabled) {
+    badge.textContent = 'disabled';
+    return;
+  }
+  const count = trafficHistory().filter((flow) => scopeRuleMatchesFlow(rule, flow)).length;
+  badge.textContent = `${count} ${count === 1 ? 'match' : 'matches'}`;
+}
+
 function addScopeRule(action) {
+  syncScopeDraftFromDom();
   const scope = state.config.scope || { enabled: false, rules: [] };
   state.config.scope = {
     ...scope,
@@ -2629,6 +3983,7 @@ function addScopeRule(action) {
 }
 
 function deleteScopeRule(id) {
+  syncScopeDraftFromDom();
   const scope = state.config.scope || { enabled: false, rules: [] };
   state.config.scope = {
     ...scope,
@@ -2638,17 +3993,15 @@ function deleteScopeRule(id) {
 }
 
 async function saveScopeConfig() {
-  const rules = [
-    ...readScopeRuleRows(el.includeScopeRulesList, 'include'),
-    ...readScopeRuleRows(el.excludeScopeRulesList, 'exclude'),
-  ];
+  syncScopeDraftFromDom();
+  const scope = state.config.scope || { enabled: false, rules: [] };
 
   el.scopeStatus.textContent = 'Applying scope...';
   try {
     await patchConfig({
       scope: {
-        enabled: el.scopeEnabledToggle.checked,
-        rules,
+        enabled: scope.enabled,
+        rules: scope.rules || [],
       },
     });
   } catch (error) {
@@ -2657,15 +4010,102 @@ async function saveScopeConfig() {
   }
 }
 
+function syncScopeDraftFromDom() {
+  if (!state.config || !el.includeScopeRulesList || !el.excludeScopeRulesList) {
+    return;
+  }
+
+  const scope = state.config.scope || { enabled: false, rules: [] };
+  state.config.scope = {
+    ...scope,
+    enabled: el.scopeEnabledToggle.checked,
+    rules: [
+      ...readScopeRuleRows(el.includeScopeRulesList, 'include'),
+      ...readScopeRuleRows(el.excludeScopeRulesList, 'exclude'),
+    ],
+  };
+}
+
 function readScopeRuleRows(container, action) {
-  return [...container.querySelectorAll('.rule-row')].map((row) => ({
+  return [...container.querySelectorAll('.rule-row')].map((row) => readScopeRuleRow(row, action));
+}
+
+function readScopeRuleRow(row, action = row?.dataset.scopeAction || 'include') {
+  return {
     id: row.dataset.scopeRuleId,
     enabled: row.querySelector('[data-scope-field="enabled"]').checked,
     action,
     field: row.querySelector('[data-scope-field="field"]').value,
     operator: row.querySelector('[data-scope-field="operator"]').value,
     value: row.querySelector('[data-scope-field="value"]').value,
-  }));
+  };
+}
+
+function scopeRuleMatchesFlow(rule, flow) {
+  if (!flow || flow.type === 'connect' || flow.method === 'CONNECT') return false;
+  let candidate = '';
+  if (rule.field === 'url') candidate = scopeComparableUrl(flow.url);
+  if (rule.field === 'host') candidate = flow.host || safeUrl(flow.url)?.host || '';
+  if (rule.field === 'path') candidate = flow.path || safeUrl(flow.url)?.pathname || '';
+  if (rule.field === 'method') candidate = flow.method || '';
+  return matchesScopeCandidate(candidate, rule.operator, rule.value);
+}
+
+function matchesScopeCandidate(candidate, operator, value) {
+  const haystackRaw = String(candidate || '');
+  if (operator === 'exists') return haystackRaw.length > 0;
+
+  const needleRaw = String(value || '');
+  if (!needleRaw) return false;
+
+  if (operator === 'domain' || operator === 'domainSubdomains') {
+    const host = normalizeScopeDomain(haystackRaw);
+    const domain = normalizeScopeDomain(needleRaw);
+    return Boolean(host && domain && (host === domain || (operator === 'domainSubdomains' && host.endsWith(`.${domain}`))));
+  }
+
+  if (operator === 'regex') {
+    try {
+      return new RegExp(needleRaw, 'i').test(haystackRaw);
+    } catch {
+      return false;
+    }
+  }
+
+  const haystack = haystackRaw.toLowerCase();
+  const needle = needleRaw.toLowerCase();
+  if (operator === 'equals') return haystack === needle;
+  if (operator === 'startsWith') return haystack.startsWith(needle);
+  if (operator === 'endsWith') return haystack.endsWith(needle);
+  return haystack.includes(needle);
+}
+
+function scopeComparableUrl(url) {
+  const parsed = safeUrl(url);
+  return parsed ? `${parsed.origin}${parsed.pathname || '/'}` : String(url || '').split(/[?#]/, 1)[0];
+}
+
+function stripUrlQuery(value) {
+  const parsed = safeUrl(value);
+  return parsed ? `${parsed.origin}${parsed.pathname || '/'}` : String(value || '').split(/[?#]/, 1)[0];
+}
+
+function normalizeScopePath(value) {
+  const parsed = safeUrl(value);
+  const path = parsed ? parsed.pathname || '/' : String(value || '').trim().split(/[?#]/, 1)[0];
+  if (!path) return '/';
+  return path.startsWith('/') ? path : `/${path}`;
+}
+
+function normalizeScopeDomain(value) {
+  const text = String(value || '')
+    .trim()
+    .replace(/^\*\./, '')
+    .split(/[/?#]/, 1)[0];
+  if (!text) return '';
+  const parsed = safeUrl(text.includes('://') ? text : `http://${text}`);
+  if (parsed) return parsed.hostname.toLowerCase();
+  return text.replace(/:\d+$/, '').toLowerCase();
 }
 
 function selectedPending() {
@@ -2703,13 +4143,14 @@ async function patchConfig(partial) {
     body: JSON.stringify(partial),
   });
   await refreshHistoryAndSiteMap();
-  renderAll();
+  renderAll({ config: true });
 }
 
 function setView(view) {
   const viewTitles = {
     traffic: 'Traffic',
     siteMap: 'Site Map',
+    findings: 'Findings',
     scope: 'Scope',
     echo: 'Echo',
     intercept: 'Intercept',
@@ -2768,6 +4209,17 @@ function timeAgo(time) {
   const minutes = Math.round(seconds / 60);
   if (minutes < 60) return `${minutes}m`;
   return `${Math.round(minutes / 60)}h`;
+}
+
+function downloadFilename(contentDisposition) {
+  const match = String(contentDisposition || '').match(/filename="?([^";]+)"?/i);
+  return match ? match[1] : '';
+}
+
+function clampNumber(value, min, max, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.max(min, Math.min(max, number));
 }
 
 function escapeHtml(value) {

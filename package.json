@@ -9,7 +9,8 @@
     "desktop": "electron .",
     "server": "node src/main/server.js",
     "test": "node --test test/*.test.js",
-    "package:mac": "CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac dir"
+    "package:mac": "CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac dir",
+    "postpackage:mac": "npm rebuild better-sqlite3"
   },
   "keywords": [
     "proxy",
@@ -37,7 +38,10 @@
     }
   },
   "devDependencies": {
-    "electron": "^42.0.1",
+    "electron": "^41.5.2",
     "electron-builder": "^26.8.1"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.10.0"
   }
 }

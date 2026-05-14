@@ -32,6 +32,7 @@ const defaultConfig = {
   },
   upstreams: [],
   upstreamRules: [],
+  rewriteRules: [],
 };
 
 module.exports = {
