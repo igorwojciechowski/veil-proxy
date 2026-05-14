@@ -893,6 +893,116 @@ test('records local MCP exchanges without exposing authorization headers', async
   }
 });
 
+test('manages local MCP secrets through the API without returning values', async () => {
+  const app = createApp({
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+      mcp: {
+        enabled: true,
+        port: 0,
+        token: 'test-token',
+      },
+    },
+  });
+
+  await app.start();
+
+  try {
+    const created = await apiRequest(app.api.port, '/api/mcp/secrets', 'POST', {
+      name: 'auth_token',
+      value: 'secret-api-value-1234567890',
+      description: 'API auth token.',
+    });
+    assert.equal(created.name, 'AUTH_TOKEN');
+    assert.equal(created.value, undefined);
+    assert.equal(created.alias.startsWith('$secret:AUTH_TOKEN:'), true);
+
+    const secrets = await apiRequest(app.api.port, '/api/mcp/secrets');
+    assert.equal(secrets.length, 1);
+    assert.equal(JSON.stringify(secrets).includes('secret-api-value-1234567890'), false);
+
+    const disabled = await apiRequest(app.api.port, `/api/mcp/secrets/${encodeURIComponent(created.id)}`, 'PATCH', {
+      enabled: false,
+    });
+    assert.equal(disabled.enabled, false);
+
+    const regenerated = await apiRequest(app.api.port, `/api/mcp/secrets/${encodeURIComponent(created.id)}`, 'PATCH', {
+      regenerateAlias: true,
+    });
+    assert.notEqual(regenerated.alias, created.alias);
+
+    const deleted = await apiRequest(app.api.port, `/api/mcp/secrets/${encodeURIComponent(created.id)}`, 'DELETE');
+    assert.equal(deleted.deleted, true);
+    assert.equal((await apiRequest(app.api.port, '/api/mcp/secrets')).length, 0);
+  } finally {
+    await app.stop();
+  }
+});
+
+test('MCP anonymization settings change returned traffic redaction', async () => {
+  const app = createApp({
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+      mcp: {
+        enabled: true,
+        port: 0,
+        token: 'test-token',
+        anonymization: {
+          profile: 'local',
+          redactHosts: false,
+          redactCookieNames: false,
+          redactCookieValues: false,
+          redactAuthorization: true,
+          redactPlatformHeaders: false,
+          aggressivePathRedaction: false,
+          maxBodyChars: 262144,
+        },
+      },
+    },
+  });
+
+  await app.start();
+
+  try {
+    const local = await mcpToolCall(app, 'anonymize_http', {
+      message: 'GET /users/alice HTTP/1.1\r\nHost: private.example.com\r\nCookie: SID=plain-cookie\r\nAuthorization: Bearer top-secret-token-1234567890\r\n\r\n',
+    });
+    const localText = local.result.structuredContent.message;
+    assert.equal(localText.includes('private.example.com'), true);
+    assert.equal(localText.includes('SID=plain-cookie'), true);
+    assert.equal(localText.includes('top-secret-token-1234567890'), false);
+
+    await apiRequest(app.api.port, '/api/config', 'PATCH', {
+      mcp: {
+        ...app.proxy.getConfig().mcp,
+        anonymization: {
+          profile: 'strict',
+          redactHosts: true,
+          redactCookieNames: true,
+          redactCookieValues: true,
+          redactAuthorization: true,
+          redactPlatformHeaders: true,
+          aggressivePathRedaction: true,
+          maxBodyChars: 131072,
+        },
+      },
+    });
+
+    const strict = await mcpToolCall(app, 'anonymize_http', {
+      message: 'GET /users/alice HTTP/1.1\r\nHost: private.example.com\r\nCookie: SID=plain-cookie\r\nServer: nginx\r\n\r\n',
+    });
+    const strictText = strict.result.structuredContent.message;
+    assert.equal(strictText.includes('private.example.com'), false);
+    assert.equal(strictText.includes('plain-cookie'), false);
+    assert.equal(strictText.includes('nginx'), false);
+    assert.equal(strictText.includes('app-'), true);
+  } finally {
+    await app.stop();
+  }
+});
+
 test('MCP controlled payloads return sanitized reflection evidence', async () => {
   const app = createApp({
     config: {
@@ -1115,6 +1225,7 @@ test('MCP run_payload_attack sends payload variants and returns anonymized resul
 
     assert.equal(structured.executed, 3);
     assert.equal(structured.payloadCount, 3);
+    assert.equal(typeof structured.attackId, 'string');
     assert.equal(structured.results.length, 3);
     assert.equal(structured.reflectedCount, 3);
     assert.equal(structured.secretAliasesUsed.includes(secret.alias), true);
@@ -1124,6 +1235,19 @@ test('MCP run_payload_attack sends payload variants and returns anonymized resul
     assert.equal(serialized.includes('attack-secret-1234567890'), false);
     assert.equal(serialized.includes(`127.0.0.1:${origin.port}`), false);
     assert.equal(serialized.includes(secret.alias), true);
+
+    const attackRuns = await apiRequest(app.api.port, '/api/payload-attacks');
+    assert.equal(attackRuns.length, 1);
+    assert.equal(attackRuns[0].id, structured.attackId);
+    assert.equal(attackRuns[0].sourceId, sourceId);
+    assert.equal(attackRuns[0].executed, 3);
+    assert.equal(attackRuns[0].reflectedCount, 3);
+
+    const attackDetail = await apiRequest(app.api.port, `/api/payload-attacks/${encodeURIComponent(structured.attackId)}`);
+    assert.equal(attackDetail.results.length, 3);
+    assert.equal(attackDetail.results.every((item) => item.sentTrafficId), true);
+    assert.equal(attackDetail.secretAliasesUsed.includes(secret.alias), true);
+    assert.equal(JSON.stringify(attackDetail).includes('attack-secret-1234567890'), false);
   } finally {
     await app.stop();
     await origin.close();
@@ -1658,6 +1782,36 @@ test('exports, clears, and imports project snapshots', async () => {
       },
       notes: ['snapshot sent traffic'],
     });
+    app.proxy.addPayloadAttack({
+      id: 'attack-snapshot',
+      sourceId: app.proxy.listHistory()[0].id,
+      method: 'GET',
+      url: target,
+      insertionPoint: { type: 'query', name: 'q' },
+      startedAt: Date.now(),
+      completedAt: Date.now(),
+      durationMs: 2,
+      requestedPayloads: 1,
+      executed: 1,
+      sent: 1,
+      errors: 0,
+      interesting: 1,
+      reflectedCount: 1,
+      securitySignalCount: 0,
+      statusCodes: { 200: 1 },
+      results: [
+        {
+          index: 0,
+          sentTrafficId: 'sent-snapshot',
+          payloadPreview: 'snapshot',
+          statusCode: 200,
+          durationMs: 2,
+          responseBytesDelta: 12,
+          payloadReflected: true,
+          interesting: true,
+        },
+      ],
+    });
     app.mcp.replaceExchanges([
       {
         id: 'mcp-snapshot',
@@ -1693,6 +1847,7 @@ test('exports, clears, and imports project snapshots', async () => {
     assert.equal(exported.ui.echo.tabs[0].id, 'snapshot-tab');
     assert.equal(Array.isArray(exported.findings), true);
     assert.equal(exported.sentTraffic.some((record) => record.id === 'sent-snapshot'), true);
+    assert.equal(exported.payloadAttacks.some((record) => record.id === 'attack-snapshot'), true);
     assert.equal(exported.mcpExchanges.some((record) => record.id === 'mcp-snapshot'), true);
 
     const cleared = await apiRequest(app.api.port, '/api/project/new', 'POST');
@@ -1701,15 +1856,18 @@ test('exports, clears, and imports project snapshots', async () => {
     assert.equal(app.proxy.listHistory().length, 0);
     assert.equal((await apiRequest(app.api.port, '/api/findings')).length, 0);
     assert.equal((await apiRequest(app.api.port, '/api/sent-traffic')).length, 0);
+    assert.equal((await apiRequest(app.api.port, '/api/payload-attacks')).length, 0);
     assert.equal((await apiRequest(app.api.port, '/api/mcp/exchanges')).length, 0);
 
     const imported = await apiRequest(app.api.port, '/api/project/import', 'POST', exported);
     assert.equal(imported.history.some((flow) => flow.url === target), true);
     assert.equal(imported.ui.echo.tabs[0].id, 'snapshot-tab');
     assert.equal(imported.sentTraffic.some((record) => record.id === 'sent-snapshot'), true);
+    assert.equal(imported.payloadAttacks.some((record) => record.id === 'attack-snapshot'), true);
     assert.equal(imported.mcpExchanges.some((record) => record.id === 'mcp-snapshot'), true);
     assert.equal(app.proxy.listHistory().some((flow) => flow.url === target), true);
     assert.equal((await apiRequest(app.api.port, '/api/sent-traffic')).some((record) => record.id === 'sent-snapshot'), true);
+    assert.equal((await apiRequest(app.api.port, '/api/payload-attacks')).some((record) => record.id === 'attack-snapshot'), true);
     assert.equal((await apiRequest(app.api.port, '/api/mcp/exchanges')).some((record) => record.id === 'mcp-snapshot'), true);
   } finally {
     await app.stop();

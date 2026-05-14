@@ -11,6 +11,7 @@ Veil Proxy is a desktop intercepting web proxy prototype inspired by Burp Suite.
 - HTTPS MITM inspection with a downloadable local CA certificate.
 - Upstream routing through direct, HTTP proxy, or SOCKS5 proxy modes.
 - MCP server for LLM tools with anonymized request/response access and local secret aliases.
+- Payload attack run history for MCP-driven Intruder-style testing.
 - Electron desktop app with an embedded local backend.
 - Optional web UI served by the same backend for development.
 
@@ -71,7 +72,11 @@ When `Active testing` is enabled in MCP settings, Veil Proxy also exposes active
 
 MCP-sent requests are stored locally in the `Sent` view and in project snapshots. The local UI can inspect raw sent request/response evidence; MCP clients only receive anonymized output through tools such as `get_sent_traffic_item`.
 
+The `Attacks` view records `run_payload_attack` runs locally with payload counts, status-code distributions, interesting/reflected/security-signal flags, and links to the generated `Sent` requests. Attack run history is included in project save/load snapshots.
+
 The `MCP Log` view records local JSON-RPC exchanges with request/response payloads for operator debugging. Authorization headers are not stored in the log, and the log is never exposed through MCP tools.
+
+The `Secrets` view lets the operator add, disable, regenerate, copy, and delete local secret aliases. Secret values stay in memory; MCP clients receive only aliases. `Settings -> Anonymization` controls the MCP redaction profile at runtime, including host/cookie/auth/platform-header redaction and body clipping.
 
 ## Environment
 

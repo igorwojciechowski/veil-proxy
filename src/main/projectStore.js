@@ -157,6 +157,15 @@ class ProjectStore {
     this.setJsonMeta('mcpExchanges', Array.isArray(records) ? records : []);
   }
 
+  getPayloadAttacks() {
+    const value = this.getJsonMeta('payloadAttacks', []);
+    return Array.isArray(value) ? value : [];
+  }
+
+  setPayloadAttacks(records) {
+    this.setJsonMeta('payloadAttacks', Array.isArray(records) ? records : []);
+  }
+
   loadHistory(limit) {
     const safeLimit = normalizeLimit(limit);
     return this.statements.listFlows
@@ -176,6 +185,7 @@ class ProjectStore {
       reportedFindings: this.getFindings(),
       sentTraffic: this.getSentTraffic(),
       mcpExchanges: this.getMcpExchanges(),
+      payloadAttacks: this.getPayloadAttacks(),
     };
   }
 
@@ -192,6 +202,7 @@ class ProjectStore {
       this.setFindings(normalized.reportedFindings || []);
       this.setSentTraffic(normalized.sentTraffic || []);
       this.setMcpExchanges(normalized.mcpExchanges || []);
+      this.setPayloadAttacks(normalized.payloadAttacks || []);
       for (const flow of normalized.history || []) {
         this.upsertFlow(flow);
       }
@@ -430,6 +441,7 @@ function normalizeProjectData(data) {
     reportedFindings: normalizeReportedFindings(raw.reportedFindings || raw.findings),
     sentTraffic: normalizeSentTraffic(raw.sentTraffic),
     mcpExchanges: normalizeMcpExchanges(raw.mcpExchanges),
+    payloadAttacks: normalizePayloadAttacks(raw.payloadAttacks),
   };
 }
 
@@ -471,6 +483,23 @@ function normalizeMcpExchanges(value) {
       rpcMethod: String(record.rpcMethod || ''),
       tool: String(record.tool || ''),
       error: String(record.error || ''),
+    }))
+    .slice(0, 500);
+}
+
+function normalizePayloadAttacks(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((record) => record && typeof record === 'object' && record.id)
+    .map((record) => ({
+      ...record,
+      id: String(record.id),
+      sourceId: String(record.sourceId || ''),
+      method: String(record.method || ''),
+      url: String(record.url || ''),
+      results: Array.isArray(record.results) ? record.results : [],
+      details: Array.isArray(record.details) ? record.details : [],
+      secretAliasesUsed: Array.isArray(record.secretAliasesUsed) ? record.secretAliasesUsed.map(String) : [],
     }))
     .slice(0, 500);
 }

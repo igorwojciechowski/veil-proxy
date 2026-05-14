@@ -26,6 +26,7 @@ class ProxyServer extends EventEmitter {
     this.flowCounter = nextFlowCounter(this.history);
     this.reportedFindings = sanitizeReportedFindings(options.reportedFindings || (this.store && this.store.getFindings ? this.store.getFindings() : []));
     this.sentTraffic = sanitizeSentTraffic(options.sentTraffic || (this.store && this.store.getSentTraffic ? this.store.getSentTraffic() : []));
+    this.payloadAttacks = sanitizePayloadAttacks(options.payloadAttacks || (this.store && this.store.getPayloadAttacks ? this.store.getPayloadAttacks() : []));
     this.port = this.config.proxyPort;
     this.certAuthority = new CertificateAuthority(this.config.https && this.config.https.certDir);
     this.mitmTargets = new WeakMap();
@@ -270,17 +271,68 @@ class ProxyServer extends EventEmitter {
     }
   }
 
+  listPayloadAttacks() {
+    return this.payloadAttacks.map((record) => payloadAttackSummary(record));
+  }
+
+  getPayloadAttacks() {
+    return structuredClone(this.payloadAttacks);
+  }
+
+  getPayloadAttack(id) {
+    const record = this.payloadAttacks.find((item) => item.id === String(id)) || null;
+    return record ? structuredClone(record) : null;
+  }
+
+  addPayloadAttack(record = {}) {
+    const normalized = sanitizePayloadAttack(record);
+    if (!normalized) {
+      return null;
+    }
+    const existingIndex = this.payloadAttacks.findIndex((item) => item.id === normalized.id);
+    if (existingIndex >= 0) {
+      this.payloadAttacks.splice(existingIndex, 1);
+    }
+    this.payloadAttacks.unshift(normalized);
+    this.payloadAttacks = this.payloadAttacks.slice(0, 500);
+    this.persistPayloadAttacks();
+    this.emit('payload-attacks', this.listPayloadAttacks());
+    return structuredClone(normalized);
+  }
+
+  replacePayloadAttacks(records = []) {
+    this.payloadAttacks = sanitizePayloadAttacks(records).slice(0, 500);
+    this.persistPayloadAttacks();
+    this.emit('payload-attacks', this.listPayloadAttacks());
+    return this.getPayloadAttacks();
+  }
+
+  clearPayloadAttacks() {
+    this.payloadAttacks = [];
+    this.persistPayloadAttacks();
+    this.emit('payload-attacks', []);
+    return [];
+  }
+
+  persistPayloadAttacks() {
+    if (this.store && this.store.setPayloadAttacks) {
+      this.store.setPayloadAttacks(this.payloadAttacks);
+    }
+  }
+
   replaceHistory(history, options = {}) {
     const nextHistory = Array.isArray(history) ? structuredClone(history).filter((flow) => flow && flow.id && flow.request) : [];
     this.history = nextHistory.slice(0, this.config.historyLimit);
     this.flowCounter = nextFlowCounter(this.history);
     this.reportedFindings = [];
     this.sentTraffic = [];
+    this.payloadAttacks = [];
 
     if (options.persist !== false && this.store) {
       this.store.clearHistory();
       this.persistReportedFindings();
       this.persistSentTraffic();
+      this.persistPayloadAttacks();
       for (const flow of this.history) {
         this.store.upsertFlow(flow);
       }
@@ -295,13 +347,16 @@ class ProxyServer extends EventEmitter {
     this.flowCounter = 1;
     this.reportedFindings = [];
     this.sentTraffic = [];
+    this.payloadAttacks = [];
     if (this.store) {
       this.store.clearHistory();
       this.persistReportedFindings();
       this.persistSentTraffic();
+      this.persistPayloadAttacks();
     }
     this.emit('findings', this.getFindings());
     this.emit('sent-traffic', this.listSentTraffic());
+    this.emit('payload-attacks', this.listPayloadAttacks());
     return this.listHistory();
   }
 
@@ -1237,7 +1292,71 @@ function sanitizeMcp(mcp) {
     token: String(raw.token || '').slice(0, 512),
     requireScope: raw.requireScope === true,
     activeTesting: raw.activeTesting === true,
+    anonymization: sanitizeMcpAnonymization(raw.anonymization),
   };
+}
+
+function sanitizeMcpAnonymization(value) {
+  const raw = value && typeof value === 'object' ? value : {};
+  const profile = ['balanced', 'strict', 'local', 'custom'].includes(String(raw.profile || 'balanced')) ? String(raw.profile || 'balanced') : 'balanced';
+  const profiled = anonymizationProfileOptions(profile);
+  return {
+    ...profiled,
+    profile,
+    aggressivePathRedaction: boolOrDefault(raw.aggressivePathRedaction, profiled.aggressivePathRedaction),
+    redactHosts: boolOrDefault(raw.redactHosts, profiled.redactHosts),
+    redactCookieNames: boolOrDefault(raw.redactCookieNames, profiled.redactCookieNames),
+    redactCookieValues: boolOrDefault(raw.redactCookieValues, profiled.redactCookieValues),
+    redactAuthorization: boolOrDefault(raw.redactAuthorization, profiled.redactAuthorization),
+    redactPlatformHeaders: boolOrDefault(raw.redactPlatformHeaders, profiled.redactPlatformHeaders),
+    maxBodyChars: clampNumber(raw.maxBodyChars, 4096, 2 * 1024 * 1024, profiled.maxBodyChars),
+  };
+}
+
+function anonymizationProfileOptions(profile) {
+  if (profile === 'strict') {
+    return {
+      aggressivePathRedaction: true,
+      redactHosts: true,
+      redactCookieNames: true,
+      redactCookieValues: true,
+      redactAuthorization: true,
+      redactPlatformHeaders: true,
+      maxBodyChars: 128 * 1024,
+    };
+  }
+  if (profile === 'local') {
+    return {
+      aggressivePathRedaction: false,
+      redactHosts: false,
+      redactCookieNames: false,
+      redactCookieValues: false,
+      redactAuthorization: true,
+      redactPlatformHeaders: false,
+      maxBodyChars: 512 * 1024,
+    };
+  }
+  return {
+    aggressivePathRedaction: false,
+    redactHosts: true,
+    redactCookieNames: true,
+    redactCookieValues: true,
+    redactAuthorization: true,
+    redactPlatformHeaders: false,
+    maxBodyChars: 256 * 1024,
+  };
+}
+
+function boolOrDefault(value, fallback) {
+  return typeof value === 'boolean' ? value : fallback;
+}
+
+function clampNumber(value, min, max, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return fallback;
+  }
+  return Math.max(min, Math.min(max, Math.round(number)));
 }
 
 function normalizeMcpPort(value) {
@@ -1758,6 +1877,85 @@ function sentBodyBytes(message) {
     return Math.max(0, Math.floor((base64.length * 3) / 4) - padding);
   }
   return Buffer.byteLength(message.bodyText || '', 'utf8');
+}
+
+function sanitizePayloadAttacks(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map(sanitizePayloadAttack).filter(Boolean).slice(0, 500);
+}
+
+function sanitizePayloadAttack(record) {
+  if (!record || typeof record !== 'object') return null;
+  const results = Array.isArray(record.results) ? record.results.map(sanitizePayloadAttackResult).filter(Boolean).slice(0, 500) : [];
+  const id = trimText(record.id, 160) || `attack:${Date.now()}`;
+  return {
+    id,
+    sourceId: trimText(record.sourceId, 160),
+    method: trimText(record.method || '', 24).toUpperCase(),
+    url: trimText(record.url || '', 4096),
+    insertionPoint: record.insertionPoint && typeof record.insertionPoint === 'object' ? structuredClone(record.insertionPoint) : {},
+    startedAt: Number(record.startedAt || Date.now()),
+    completedAt: record.completedAt == null ? null : Number(record.completedAt),
+    durationMs: record.durationMs == null ? null : Number(record.durationMs),
+    requestedPayloads: Number(record.requestedPayloads || record.payloadCount || results.length || 0),
+    executed: Number(record.executed || results.length || 0),
+    sent: Number(record.sent || results.filter((item) => !item.error).length || 0),
+    errors: Number(record.errors || results.filter((item) => item.error).length || 0),
+    interesting: Number(record.interesting || results.filter((item) => item.interesting).length || 0),
+    reflectedCount: Number(record.reflectedCount || results.filter((item) => item.payloadReflected).length || 0),
+    securitySignalCount: Number(record.securitySignalCount || results.filter((item) => item.securitySignal).length || 0),
+    delayMillis: Number(record.delayMillis || 0),
+    statusCodes: record.statusCodes && typeof record.statusCodes === 'object' ? structuredClone(record.statusCodes) : {},
+    detailsTruncated: record.detailsTruncated === true,
+    secretAliasesUsed: Array.isArray(record.secretAliasesUsed) ? record.secretAliasesUsed.map((alias) => trimText(alias, 240)).filter(Boolean) : [],
+    results,
+    details: Array.isArray(record.details) ? structuredClone(record.details.slice(0, 50)) : [],
+    rawRequestReturned: false,
+    rawResponseReturned: false,
+  };
+}
+
+function sanitizePayloadAttackResult(result) {
+  if (!result || typeof result !== 'object') return null;
+  return {
+    index: Number(result.index || 0),
+    sentTrafficId: trimText(result.sentTrafficId || '', 160),
+    payloadPreview: trimText(result.payloadPreview || '', 240),
+    statusCode: result.statusCode == null ? null : Number(result.statusCode),
+    durationMs: result.durationMs == null ? null : Number(result.durationMs),
+    requestBytes: Number(result.requestBytes || 0),
+    responseBytes: Number(result.responseBytes || 0),
+    responseBytesDelta: Number(result.responseBytesDelta || 0),
+    statusChanged: result.statusChanged === true,
+    payloadReflected: result.payloadReflected === true,
+    securitySignal: result.securitySignal === true,
+    interesting: result.interesting === true,
+    title: trimText(result.title || '', 240),
+    error: result.error ? trimText(result.error, 1000) : null,
+  };
+}
+
+function payloadAttackSummary(record) {
+  return {
+    id: record.id,
+    sourceId: record.sourceId,
+    method: record.method,
+    url: record.url,
+    host: safeUrlParts(record.url).host,
+    insertionPoint: record.insertionPoint || {},
+    startedAt: record.startedAt,
+    completedAt: record.completedAt,
+    durationMs: record.durationMs,
+    requestedPayloads: record.requestedPayloads,
+    executed: record.executed,
+    sent: record.sent,
+    errors: record.errors,
+    interesting: record.interesting,
+    reflectedCount: record.reflectedCount,
+    securitySignalCount: record.securitySignalCount,
+    delayMillis: record.delayMillis,
+    statusCodes: record.statusCodes || {},
+  };
 }
 
 function sanitizeReportedFindings(value) {

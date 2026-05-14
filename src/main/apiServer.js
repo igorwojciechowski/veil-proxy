@@ -41,6 +41,7 @@ class ApiServer {
     this.proxy.on('config', (nextConfig) => this.broadcast('config', nextConfig));
     this.proxy.on('findings', (findings) => this.broadcast('findings', findings));
     this.proxy.on('sent-traffic', (items) => this.broadcast('sent-traffic', items));
+    this.proxy.on('payload-attacks', (items) => this.broadcast('payload-attacks', items));
     if (this.mcp && typeof this.mcp.on === 'function') {
       this.mcp.on('mcp-exchanges', (items) => {
         if (this.store && this.mcp.exchanges) {
@@ -133,17 +134,44 @@ class ApiServer {
           return;
         }
         const body = await readJson(req);
-        this.json(res, this.mcp.secretVault.add(body));
+        const secret = this.mcp.secretVault.add(body);
+        this.broadcast('mcp-secrets', this.mcp.secretVault.list());
+        this.json(res, secret);
         return;
       }
 
       const secretMatch = parsed.pathname.match(/^\/api\/mcp\/secrets\/([^/]+)$/);
+      if (secretMatch && req.method === 'PATCH') {
+        if (!this.mcp) {
+          this.notFound(res);
+          return;
+        }
+        const id = decodeURIComponent(secretMatch[1]);
+        const body = await readJson(req);
+        let secret = null;
+        if (body && Object.prototype.hasOwnProperty.call(body, 'enabled')) {
+          secret = this.mcp.secretVault.setEnabled(id, body.enabled === true);
+        }
+        if (body?.regenerateAlias === true) {
+          secret = this.mcp.secretVault.regenerateAlias(id);
+        }
+        if (!secret) {
+          this.notFound(res);
+          return;
+        }
+        this.broadcast('mcp-secrets', this.mcp.secretVault.list());
+        this.json(res, secret);
+        return;
+      }
+
       if (secretMatch && req.method === 'DELETE') {
         if (!this.mcp) {
           this.notFound(res);
           return;
         }
-        this.json(res, { deleted: this.mcp.secretVault.remove(decodeURIComponent(secretMatch[1])) });
+        const deleted = this.mcp.secretVault.remove(decodeURIComponent(secretMatch[1]));
+        this.broadcast('mcp-secrets', this.mcp.secretVault.list());
+        this.json(res, { deleted });
         return;
       }
 
@@ -227,6 +255,27 @@ class ApiServer {
       const sentTrafficMatch = parsed.pathname.match(/^\/api\/sent-traffic\/([^/]+)$/);
       if (sentTrafficMatch && req.method === 'GET') {
         const record = this.proxy.getSentTrafficRecord ? this.proxy.getSentTrafficRecord(decodeURIComponent(sentTrafficMatch[1])) : null;
+        if (!record) {
+          this.notFound(res);
+          return;
+        }
+        this.json(res, record);
+        return;
+      }
+
+      if (parsed.pathname === '/api/payload-attacks' && req.method === 'GET') {
+        this.json(res, this.proxy.listPayloadAttacks ? this.proxy.listPayloadAttacks() : []);
+        return;
+      }
+
+      if (parsed.pathname === '/api/payload-attacks' && req.method === 'DELETE') {
+        this.json(res, this.proxy.clearPayloadAttacks ? this.proxy.clearPayloadAttacks() : []);
+        return;
+      }
+
+      const payloadAttackMatch = parsed.pathname.match(/^\/api\/payload-attacks\/([^/]+)$/);
+      if (payloadAttackMatch && req.method === 'GET') {
+        const record = this.proxy.getPayloadAttack ? this.proxy.getPayloadAttack(decodeURIComponent(payloadAttackMatch[1])) : null;
         if (!record) {
           this.notFound(res);
           return;
@@ -329,7 +378,9 @@ class ApiServer {
       history: this.proxy.listHistory(),
       pending: this.proxy.listPending(),
       sentTraffic: this.proxy.listSentTraffic ? this.proxy.listSentTraffic() : [],
+      payloadAttacks: this.proxy.listPayloadAttacks ? this.proxy.listPayloadAttacks() : [],
       mcpExchanges: this.mcp && this.mcp.listExchanges ? this.mcp.listExchanges() : [],
+      mcpSecrets: this.mcp ? this.mcp.secretVault.list() : [],
       proxyPort: this.proxy.port,
       apiPort: this.port,
       mcp: this.mcp ? this.mcp.state() : null,
@@ -373,6 +424,7 @@ class ApiServer {
           history: this.proxy.history || [],
           reportedFindings: this.proxy.getReportedFindings ? this.proxy.getReportedFindings() : [],
           sentTraffic: this.proxy.getSentTraffic ? this.proxy.getSentTraffic() : [],
+          payloadAttacks: this.proxy.getPayloadAttacks ? this.proxy.getPayloadAttacks() : [],
           mcpExchanges: this.mcp && this.mcp.exchanges ? this.mcp.exchanges : [],
         };
     return {
@@ -380,6 +432,7 @@ class ApiServer {
       findings: this.proxy.getFindings(),
       reportedFindings: this.proxy.getReportedFindings ? this.proxy.getReportedFindings() : data.reportedFindings || [],
       sentTraffic: this.proxy.getSentTraffic ? this.proxy.getSentTraffic() : data.sentTraffic || [],
+      payloadAttacks: this.proxy.getPayloadAttacks ? this.proxy.getPayloadAttacks() : data.payloadAttacks || [],
       mcpExchanges: this.mcp && this.mcp.exchanges ? this.mcp.exchanges : data.mcpExchanges || [],
     };
   }
@@ -404,6 +457,9 @@ class ApiServer {
     if (this.proxy.replaceSentTraffic) {
       this.proxy.replaceSentTraffic(data?.sentTraffic || []);
     }
+    if (this.proxy.replacePayloadAttacks) {
+      this.proxy.replacePayloadAttacks(data?.payloadAttacks || []);
+    }
     if (this.mcp && this.mcp.replaceExchanges) {
       this.mcp.replaceExchanges(data?.mcpExchanges || []);
     }
@@ -421,6 +477,7 @@ class ApiServer {
         history: this.proxy.history,
         reportedFindings: this.proxy.getReportedFindings ? this.proxy.getReportedFindings() : [],
         sentTraffic: this.proxy.getSentTraffic ? this.proxy.getSentTraffic() : [],
+        payloadAttacks: this.proxy.getPayloadAttacks ? this.proxy.getPayloadAttacks() : [],
         mcpExchanges: this.mcp && this.mcp.exchanges ? this.mcp.exchanges : [],
       });
     }
@@ -435,6 +492,9 @@ class ApiServer {
     }
     if (this.proxy.replaceSentTraffic) {
       this.proxy.replaceSentTraffic([]);
+    }
+    if (this.proxy.replacePayloadAttacks) {
+      this.proxy.replacePayloadAttacks([]);
     }
     if (this.mcp && this.mcp.replaceExchanges) {
       this.mcp.replaceExchanges([]);
@@ -451,6 +511,7 @@ class ApiServer {
         history: [],
         reportedFindings: [],
         sentTraffic: [],
+        payloadAttacks: [],
         mcpExchanges: [],
       });
     }

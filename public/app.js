@@ -10,6 +10,7 @@ const state = {
   findings: [],
   sentTraffic: [],
   mcpExchanges: [],
+  mcpSecrets: [],
   pending: [],
   desktopProject: null,
   projectDirty: false,
@@ -75,6 +76,9 @@ const state = {
   findingsSeverity: '',
   selectedSentTrafficId: null,
   selectedSentTraffic: null,
+  payloadAttacks: [],
+  selectedPayloadAttackId: null,
+  selectedPayloadAttack: null,
   selectedMcpExchangeId: null,
   selectedMcpExchange: null,
   echoTabs: [],
@@ -162,6 +166,25 @@ const el = {
   mcpLogRequestRaw: document.querySelector('#mcpLogRequestRaw'),
   mcpLogResponseRaw: document.querySelector('#mcpLogResponseRaw'),
   mcpLogMeta: document.querySelector('#mcpLogMeta'),
+  payloadAttacksSubtitle: document.querySelector('#payloadAttacksSubtitle'),
+  payloadAttackRows: document.querySelector('#payloadAttackRows'),
+  clearPayloadAttacksBtn: document.querySelector('#clearPayloadAttacksBtn'),
+  emptyPayloadAttackDetail: document.querySelector('#emptyPayloadAttackDetail'),
+  payloadAttackDetail: document.querySelector('#payloadAttackDetail'),
+  payloadAttackMethod: document.querySelector('#payloadAttackMethod'),
+  payloadAttackUrl: document.querySelector('#payloadAttackUrl'),
+  payloadAttackStatus: document.querySelector('#payloadAttackStatus'),
+  payloadAttackSummary: document.querySelector('#payloadAttackSummary'),
+  payloadAttackResultRows: document.querySelector('#payloadAttackResultRows'),
+  payloadAttackMeta: document.querySelector('#payloadAttackMeta'),
+  secretsSubtitle: document.querySelector('#secretsSubtitle'),
+  secretName: document.querySelector('#secretName'),
+  secretValue: document.querySelector('#secretValue'),
+  secretDescription: document.querySelector('#secretDescription'),
+  addSecretBtn: document.querySelector('#addSecretBtn'),
+  refreshSecretsBtn: document.querySelector('#refreshSecretsBtn'),
+  secretStatus: document.querySelector('#secretStatus'),
+  secretRows: document.querySelector('#secretRows'),
   echoTabs: document.querySelector('#echoTabs'),
   echoGroupList: document.querySelector('#echoGroupList'),
   newEchoTabBtn: document.querySelector('#newEchoTabBtn'),
@@ -243,6 +266,16 @@ const el = {
   saveMcpBtn: document.querySelector('#saveMcpBtn'),
   mcpEndpoint: document.querySelector('#mcpEndpoint'),
   mcpStatus: document.querySelector('#mcpStatus'),
+  anonymizationProfile: document.querySelector('#anonymizationProfile'),
+  anonymizationMaxBodyChars: document.querySelector('#anonymizationMaxBodyChars'),
+  anonymizationRedactHosts: document.querySelector('#anonymizationRedactHosts'),
+  anonymizationCookieNames: document.querySelector('#anonymizationCookieNames'),
+  anonymizationCookieValues: document.querySelector('#anonymizationCookieValues'),
+  anonymizationAuthorization: document.querySelector('#anonymizationAuthorization'),
+  anonymizationPlatformHeaders: document.querySelector('#anonymizationPlatformHeaders'),
+  anonymizationAggressivePath: document.querySelector('#anonymizationAggressivePath'),
+  anonymizationStatus: document.querySelector('#anonymizationStatus'),
+  saveAnonymizationBtn: document.querySelector('#saveAnonymizationBtn'),
   projectName: document.querySelector('#projectName'),
   projectPath: document.querySelector('#projectPath'),
   newProjectBtn: document.querySelector('#newProjectBtn'),
@@ -477,12 +510,28 @@ function bindUi() {
     await loadSentTraffic(row.dataset.sentTrafficId);
   });
   el.clearSentTrafficBtn?.addEventListener('click', clearSentTraffic);
+  el.payloadAttackRows?.addEventListener('click', async (event) => {
+    const row = event.target.closest('[data-payload-attack-id]');
+    if (!row) return;
+    await loadPayloadAttack(row.dataset.payloadAttackId);
+  });
+  el.payloadAttackResultRows?.addEventListener('click', async (event) => {
+    const button = event.target.closest('[data-sent-traffic-id-link]');
+    if (!button) return;
+    await loadSentTraffic(button.dataset.sentTrafficIdLink);
+    setView('sentTraffic');
+  });
+  el.clearPayloadAttacksBtn?.addEventListener('click', clearPayloadAttacks);
   el.mcpLogRows?.addEventListener('click', async (event) => {
     const row = event.target.closest('[data-mcp-exchange-id]');
     if (!row) return;
     await loadMcpExchange(row.dataset.mcpExchangeId);
   });
   el.clearMcpLogBtn?.addEventListener('click', clearMcpLog);
+  el.addSecretBtn?.addEventListener('click', addSecret);
+  el.refreshSecretsBtn?.addEventListener('click', loadSecrets);
+  el.secretRows?.addEventListener('click', handleSecretRowClick);
+  el.secretRows?.addEventListener('change', handleSecretRowChange);
   el.newEchoTabBtn.addEventListener('click', () => createBlankEchoTab());
   el.newEchoGroupBtn.addEventListener('click', createEchoGroup);
   el.sendEchoBtn.addEventListener('click', sendSelectedEchoRequest);
@@ -571,6 +620,17 @@ function bindUi() {
 
   el.saveProxyBtn.addEventListener('click', saveProxyConfig);
   el.saveMcpBtn?.addEventListener('click', saveMcpConfig);
+  el.saveAnonymizationBtn?.addEventListener('click', saveAnonymizationConfig);
+  el.anonymizationProfile?.addEventListener('change', applyAnonymizationProfileDraft);
+  [
+    el.anonymizationMaxBodyChars,
+    el.anonymizationRedactHosts,
+    el.anonymizationCookieNames,
+    el.anonymizationCookieValues,
+    el.anonymizationAuthorization,
+    el.anonymizationPlatformHeaders,
+    el.anonymizationAggressivePath,
+  ].forEach((input) => input?.addEventListener('change', markAnonymizationCustom));
   el.newProjectBtn.addEventListener('click', newProject);
   el.exportProjectBtn.addEventListener('click', () => saveProject(false));
   el.saveProjectAsBtn.addEventListener('click', () => saveProject(true));
@@ -672,6 +732,15 @@ function openEvents() {
     renderSentTraffic();
     markProjectDirty();
   });
+  events.addEventListener('payload-attacks', (event) => {
+    state.payloadAttacks = JSON.parse(event.data);
+    if (!state.payloadAttacks.some((item) => item.id === state.selectedPayloadAttackId)) {
+      state.selectedPayloadAttackId = null;
+      state.selectedPayloadAttack = null;
+    }
+    renderPayloadAttacks();
+    markProjectDirty();
+  });
   events.addEventListener('mcp-exchanges', (event) => {
     state.mcpExchanges = JSON.parse(event.data);
     if (!state.mcpExchanges.some((item) => item.id === state.selectedMcpExchangeId)) {
@@ -680,6 +749,10 @@ function openEvents() {
     }
     renderMcpLog();
     markProjectDirty();
+  });
+  events.addEventListener('mcp-secrets', (event) => {
+    state.mcpSecrets = JSON.parse(event.data);
+    renderSecrets();
   });
   events.addEventListener('pending', (event) => {
     state.pending = JSON.parse(event.data);
@@ -701,7 +774,9 @@ function applyState(payload, forceUi = false, options = {}) {
   state.project = payload.project || null;
   state.history = payload.history || [];
   state.sentTraffic = payload.sentTraffic || [];
+  state.payloadAttacks = payload.payloadAttacks || [];
   state.mcpExchanges = payload.mcpExchanges || [];
+  state.mcpSecrets = payload.mcpSecrets || [];
   state.pending = payload.pending || [];
   applyUiState(payload.ui, forceUi);
   state.selectedFlowId = state.history.some((flow) => flow.id === state.selectedFlowId) ? state.selectedFlowId : null;
@@ -761,7 +836,9 @@ function renderAll(options = {}) {
   renderGlobalSearch();
   renderFindings();
   renderSentTraffic();
+  renderPayloadAttacks();
   renderMcpLog();
+  renderSecrets();
   renderEcho();
   renderPending();
   renderDetail();
@@ -798,6 +875,7 @@ function renderConfig(options = {}) {
     el.proxyHost.value = state.config.proxyHost;
     el.proxyPort.value = state.config.proxyPort;
     renderMcpConfig();
+    renderAnonymizationConfig();
     renderUpstreamRules();
     renderRewriteRules();
   }
@@ -1251,6 +1329,63 @@ function renderMcpConfig() {
     el.mcpEndpoint.textContent = 'MCP disabled';
     el.mcpStatus.textContent = 'MCP returns anonymized data only. Real secret values are never returned.';
   }
+}
+
+function renderAnonymizationConfig() {
+  if (!el.anonymizationProfile || !state.config) return;
+  const config = anonymizationConfig();
+  el.anonymizationProfile.value = config.profile || 'balanced';
+  el.anonymizationMaxBodyChars.value = config.maxBodyChars || 262144;
+  el.anonymizationRedactHosts.checked = config.redactHosts !== false;
+  el.anonymizationCookieNames.checked = config.redactCookieNames !== false;
+  el.anonymizationCookieValues.checked = config.redactCookieValues !== false;
+  el.anonymizationAuthorization.checked = config.redactAuthorization !== false;
+  el.anonymizationPlatformHeaders.checked = config.redactPlatformHeaders === true;
+  el.anonymizationAggressivePath.checked = config.aggressivePathRedaction === true;
+}
+
+function anonymizationConfig() {
+  return {
+    ...anonymizationProfileDefaults('balanced'),
+    ...(state.config?.mcp?.anonymization || {}),
+  };
+}
+
+function anonymizationProfileDefaults(profile) {
+  if (profile === 'strict') {
+    return {
+      profile,
+      aggressivePathRedaction: true,
+      redactHosts: true,
+      redactCookieNames: true,
+      redactCookieValues: true,
+      redactAuthorization: true,
+      redactPlatformHeaders: true,
+      maxBodyChars: 131072,
+    };
+  }
+  if (profile === 'local') {
+    return {
+      profile,
+      aggressivePathRedaction: false,
+      redactHosts: false,
+      redactCookieNames: false,
+      redactCookieValues: false,
+      redactAuthorization: true,
+      redactPlatformHeaders: false,
+      maxBodyChars: 524288,
+    };
+  }
+  return {
+    profile: profile || 'balanced',
+    aggressivePathRedaction: false,
+    redactHosts: true,
+    redactCookieNames: true,
+    redactCookieValues: true,
+    redactAuthorization: true,
+    redactPlatformHeaders: false,
+    maxBodyChars: 262144,
+  };
 }
 
 function renderUpstreamRules() {
@@ -2049,11 +2184,18 @@ function scheduleFindingsLoad() {
 }
 
 async function refreshHistoryAndSiteMap() {
-  const [history, siteMap, findings, sentTraffic] = await Promise.all([api('/api/history'), api('/api/site-map'), api('/api/findings'), api('/api/sent-traffic')]);
+  const [history, siteMap, findings, sentTraffic, payloadAttacks] = await Promise.all([
+    api('/api/history'),
+    api('/api/site-map'),
+    api('/api/findings'),
+    api('/api/sent-traffic'),
+    api('/api/payload-attacks'),
+  ]);
   state.history = history;
   state.siteMap = siteMap;
   state.findings = findings;
   state.sentTraffic = sentTraffic;
+  state.payloadAttacks = payloadAttacks;
 }
 
 function renderSiteMap() {
@@ -2433,6 +2575,153 @@ function shortToolName(tool) {
   return String(tool || 'mcp').replace(/^send_/, '').replace(/_proxy_item|_item/g, '').replace(/_/g, ' ');
 }
 
+function renderPayloadAttacks() {
+  if (!el.payloadAttackRows) return;
+  const records = Array.isArray(state.payloadAttacks) ? state.payloadAttacks : [];
+  el.payloadAttacksSubtitle.textContent = `${records.length} ${records.length === 1 ? 'run' : 'runs'}`;
+  el.clearPayloadAttacksBtn.disabled = records.length === 0;
+  el.payloadAttackRows.innerHTML =
+    records
+      .map((record) => {
+        const rowClass = record.id === state.selectedPayloadAttackId ? 'selected' : '';
+        const payloads = `${record.executed || 0}/${record.requestedPayloads || 0}`;
+        const interesting = `${record.interesting || 0}${record.errors ? `, ${record.errors} err` : ''}`;
+        return `
+          <tr class="${rowClass}" data-payload-attack-id="${escapeHtml(record.id)}">
+            <td title="${escapeHtml(record.id)}">${escapeHtml(shortAttackId(record.id))}</td>
+            <td>${escapeHtml(record.sourceId ? `#${record.sourceId}` : '-')}</td>
+            <td><span class="method-pill small">${escapeHtml(record.method || '-')}</span></td>
+            <td title="${escapeHtml(record.host || '')}">${escapeHtml(record.host || '-')}</td>
+            <td>${escapeHtml(payloads)}</td>
+            <td><span class="status-pill ${record.errors ? 'error' : ''}">${escapeHtml(interesting)}</span></td>
+            <td>${escapeHtml(record.durationMs == null ? '-' : `${record.durationMs}ms`)}</td>
+          </tr>
+        `;
+      })
+      .join('') || '<tr><td colspan="7"><div class="empty-state compact-empty">No payload attack runs yet</div></td></tr>';
+
+  renderPayloadAttackDetail();
+}
+
+async function loadPayloadAttack(id) {
+  state.selectedPayloadAttackId = id;
+  state.selectedPayloadAttack = await api(`/api/payload-attacks/${encodeURIComponent(id)}`);
+  renderPayloadAttacks();
+}
+
+function renderPayloadAttackDetail() {
+  if (!el.payloadAttackDetail) return;
+  const record = state.selectedPayloadAttack;
+  if (!record) {
+    el.emptyPayloadAttackDetail.classList.remove('hidden');
+    el.payloadAttackDetail.classList.add('hidden');
+    return;
+  }
+
+  const results = Array.isArray(record.results) ? record.results : [];
+  el.emptyPayloadAttackDetail.classList.add('hidden');
+  el.payloadAttackDetail.classList.remove('hidden');
+  el.payloadAttackMethod.textContent = record.method || '-';
+  el.payloadAttackUrl.textContent = record.url || '';
+  el.payloadAttackStatus.textContent = `${record.interesting || 0} interesting`;
+  el.payloadAttackStatus.classList.toggle('error', Boolean(record.errors));
+  el.payloadAttackSummary.textContent = payloadAttackSummaryText(record);
+  el.payloadAttackResultRows.innerHTML =
+    results
+      .map((result) => {
+        const signals = [
+          result.interesting ? 'interesting' : '',
+          result.statusChanged ? 'status' : '',
+          result.payloadReflected ? 'reflected' : '',
+          result.securitySignal ? 'security' : '',
+          result.error ? 'error' : '',
+        ].filter(Boolean);
+        return `
+          <tr class="${result.error ? 'error-row' : ''}">
+            <td>${escapeHtml(String(result.index ?? '-'))}</td>
+            <td title="${escapeHtml(result.payloadPreview || '')}"><code>${escapeHtml(result.payloadPreview || '-')}</code></td>
+            <td><span class="status-pill ${result.error ? 'error' : ''}">${escapeHtml(result.error ? 'ERR' : String(result.statusCode || '-'))}</span></td>
+            <td>${escapeHtml(result.responseBytesDelta == null ? '-' : signedNumber(result.responseBytesDelta))}</td>
+            <td>${signals.map((signal) => `<span class="mini-chip">${escapeHtml(signal)}</span>`).join('') || '-'}</td>
+            <td>${
+              result.sentTrafficId
+                ? `<button class="button ghost compact-button" type="button" data-sent-traffic-id-link="${escapeHtml(result.sentTrafficId)}">${escapeHtml(shortSentId(result.sentTrafficId))}</button>`
+                : '-'
+            }</td>
+          </tr>
+        `;
+      })
+      .join('') || '<tr><td colspan="6"><div class="empty-state compact-empty">No payload results</div></td></tr>';
+  el.payloadAttackMeta.textContent = JSON.stringify(
+    {
+      id: record.id,
+      sourceId: record.sourceId,
+      insertionPoint: record.insertionPoint || {},
+      startedAt: record.startedAt ? new Date(record.startedAt).toISOString() : null,
+      completedAt: record.completedAt ? new Date(record.completedAt).toISOString() : null,
+      statusCodes: record.statusCodes || {},
+      secretAliasesUsed: record.secretAliasesUsed || [],
+      detailsTruncated: record.detailsTruncated === true,
+      details: record.details || [],
+    },
+    null,
+    2,
+  );
+}
+
+async function clearPayloadAttacks() {
+  if (!state.payloadAttacks.length) return;
+  if (!window.confirm('Clear payload attack run history? Sent traffic will stay intact.')) {
+    return;
+  }
+  state.payloadAttacks = await api('/api/payload-attacks', { method: 'DELETE' });
+  state.selectedPayloadAttackId = null;
+  state.selectedPayloadAttack = null;
+  renderPayloadAttacks();
+  markProjectDirty();
+}
+
+function payloadAttackSummaryText(record) {
+  return [
+    `Attack ID: ${record.id || '-'}`,
+    `Source: ${record.sourceId ? `#${record.sourceId}` : '-'}`,
+    `Target: ${record.method || '-'} ${record.url || '-'}`,
+    `Insertion: ${insertionPointLabel(record.insertionPoint)}`,
+    `Payloads: ${record.executed || 0}/${record.requestedPayloads || 0}`,
+    `Sent: ${record.sent || 0}`,
+    `Errors: ${record.errors || 0}`,
+    `Interesting: ${record.interesting || 0}`,
+    `Reflected: ${record.reflectedCount || 0}`,
+    `Security signals: ${record.securitySignalCount || 0}`,
+    `Delay: ${record.delayMillis || 0}ms`,
+    `Duration: ${record.durationMs == null ? '-' : `${record.durationMs}ms`}`,
+    `Status codes: ${statusCodesLabel(record.statusCodes)}`,
+    `Secrets: ${(record.secretAliasesUsed || []).join(', ') || '-'}`,
+  ].join('\n');
+}
+
+function insertionPointLabel(point) {
+  if (!point || typeof point !== 'object') return '-';
+  const parts = [point.type, point.name, point.marker ? `marker ${point.marker}` : '', point.hasTemplate ? 'template' : ''].filter(Boolean);
+  return parts.join(' / ') || '-';
+}
+
+function statusCodesLabel(statusCodes) {
+  const entries = Object.entries(statusCodes || {});
+  return entries.length ? entries.map(([code, count]) => `${code}:${count}`).join(', ') : '-';
+}
+
+function signedNumber(value) {
+  const number = Number(value || 0);
+  return number > 0 ? `+${number}` : String(number);
+}
+
+function shortAttackId(id) {
+  const text = String(id || '');
+  const match = text.match(/^attack-([^-]+)-/);
+  return match ? `#${match[1]}` : text.slice(0, 18);
+}
+
 function renderMcpLog() {
   if (!el.mcpLogRows) return;
   const records = Array.isArray(state.mcpExchanges) ? state.mcpExchanges : [];
@@ -2525,6 +2814,107 @@ function setHighlightedJson(target, value) {
   const text = JSON.stringify(value == null ? null : value, null, 2);
   target.dataset.rawText = text;
   target.innerHTML = renderLineNumberedHighlighted(highlightJson(text));
+}
+
+function renderSecrets() {
+  if (!el.secretRows) return;
+  const secrets = Array.isArray(state.mcpSecrets) ? state.mcpSecrets : [];
+  el.secretsSubtitle.textContent = `${secrets.length} ${secrets.length === 1 ? 'alias' : 'aliases'} available to MCP`;
+  el.secretRows.innerHTML =
+    secrets
+      .map(
+        (secret) => `
+          <tr data-secret-id="${escapeHtml(secret.id)}">
+            <td>
+              <input type="checkbox" data-secret-toggle="${escapeHtml(secret.id)}" ${secret.enabled !== false ? 'checked' : ''} aria-label="Secret enabled" />
+            </td>
+            <td title="${escapeHtml(secret.name || '')}">${escapeHtml(secret.name || '-')}</td>
+            <td title="${escapeHtml(secret.description || '')}">${escapeHtml(secret.description || '-')}</td>
+            <td title="${escapeHtml(secret.alias || '')}"><code>${escapeHtml(secret.alias || '')}</code></td>
+            <td>${escapeHtml(secret.lastUsedAt ? timeAgo(secret.lastUsedAt) : '-')}</td>
+            <td>
+              <div class="button-row secret-actions">
+                <button class="button ghost compact-button" type="button" data-secret-copy="${escapeHtml(secret.id)}">Copy</button>
+                <button class="button ghost compact-button" type="button" data-secret-regenerate="${escapeHtml(secret.id)}">Regenerate</button>
+                <button class="button danger compact-button" type="button" data-secret-delete="${escapeHtml(secret.id)}">Delete</button>
+              </div>
+            </td>
+          </tr>
+        `,
+      )
+      .join('') || '<tr><td colspan="6"><div class="empty-state compact-empty">No local MCP secrets yet</div></td></tr>';
+}
+
+async function loadSecrets() {
+  state.mcpSecrets = await api('/api/mcp/secrets');
+  renderSecrets();
+}
+
+async function addSecret() {
+  const name = el.secretName.value.trim();
+  const value = el.secretValue.value;
+  const description = el.secretDescription.value.trim();
+  if (!value) {
+    el.secretStatus.textContent = 'Secret value is required.';
+    return;
+  }
+  try {
+    await api('/api/mcp/secrets', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name, value, description }),
+    });
+    el.secretName.value = '';
+    el.secretValue.value = '';
+    el.secretDescription.value = '';
+    el.secretStatus.textContent = 'Secret added. Use its alias in MCP active tools.';
+    await loadSecrets();
+  } catch (error) {
+    el.secretStatus.textContent = `Could not add secret: ${formatError(error)}`;
+  }
+}
+
+async function handleSecretRowClick(event) {
+  const copyButton = event.target.closest('[data-secret-copy]');
+  if (copyButton) {
+    const secret = state.mcpSecrets.find((item) => item.id === copyButton.dataset.secretCopy);
+    if (secret?.alias) {
+      await navigator.clipboard.writeText(secret.alias).catch(() => fallbackCopyText(secret.alias));
+      el.secretStatus.textContent = 'Alias copied.';
+    }
+    return;
+  }
+
+  const regenerateButton = event.target.closest('[data-secret-regenerate]');
+  if (regenerateButton) {
+    await updateSecret(regenerateButton.dataset.secretRegenerate, { regenerateAlias: true });
+    el.secretStatus.textContent = 'Alias regenerated.';
+    return;
+  }
+
+  const deleteButton = event.target.closest('[data-secret-delete]');
+  if (deleteButton) {
+    if (!window.confirm('Delete this local secret alias?')) return;
+    await api(`/api/mcp/secrets/${encodeURIComponent(deleteButton.dataset.secretDelete)}`, { method: 'DELETE' });
+    el.secretStatus.textContent = 'Secret deleted.';
+    await loadSecrets();
+  }
+}
+
+async function handleSecretRowChange(event) {
+  const checkbox = event.target.closest('[data-secret-toggle]');
+  if (!checkbox) return;
+  await updateSecret(checkbox.dataset.secretToggle, { enabled: checkbox.checked });
+  el.secretStatus.textContent = checkbox.checked ? 'Secret enabled.' : 'Secret disabled.';
+}
+
+async function updateSecret(id, patch) {
+  await api(`/api/mcp/secrets/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  await loadSecrets();
 }
 
 function buildSiteTree(paths) {
@@ -4721,6 +5111,58 @@ async function saveMcpConfig() {
   }
 }
 
+function applyAnonymizationProfileDraft() {
+  const profile = el.anonymizationProfile.value;
+  if (profile === 'custom') {
+    return;
+  }
+  const defaults = anonymizationProfileDefaults(profile);
+  el.anonymizationMaxBodyChars.value = defaults.maxBodyChars;
+  el.anonymizationRedactHosts.checked = defaults.redactHosts;
+  el.anonymizationCookieNames.checked = defaults.redactCookieNames;
+  el.anonymizationCookieValues.checked = defaults.redactCookieValues;
+  el.anonymizationAuthorization.checked = defaults.redactAuthorization;
+  el.anonymizationPlatformHeaders.checked = defaults.redactPlatformHeaders;
+  el.anonymizationAggressivePath.checked = defaults.aggressivePathRedaction;
+}
+
+function markAnonymizationCustom(event) {
+  if (!event?.isTrusted || !el.anonymizationProfile) return;
+  el.anonymizationProfile.value = 'custom';
+}
+
+async function saveAnonymizationConfig() {
+  const maxBodyChars = Number(el.anonymizationMaxBodyChars.value);
+  if (!Number.isInteger(maxBodyChars) || maxBodyChars < 4096 || maxBodyChars > 2 * 1024 * 1024) {
+    el.anonymizationStatus.textContent = 'Max body chars must be between 4096 and 2097152.';
+    return;
+  }
+
+  el.anonymizationStatus.textContent = 'Saving anonymization settings...';
+  try {
+    await patchConfig({
+      mcp: {
+        ...(state.config.mcp || {}),
+        anonymization: {
+          profile: el.anonymizationProfile.value,
+          maxBodyChars,
+          redactHosts: el.anonymizationRedactHosts.checked,
+          redactCookieNames: el.anonymizationCookieNames.checked,
+          redactCookieValues: el.anonymizationCookieValues.checked,
+          redactAuthorization: el.anonymizationAuthorization.checked,
+          redactPlatformHeaders: el.anonymizationPlatformHeaders.checked,
+          aggressivePathRedaction: el.anonymizationAggressivePath.checked,
+        },
+      },
+    });
+    renderAnonymizationConfig();
+    el.anonymizationStatus.textContent = 'Anonymization settings saved.';
+  } catch (error) {
+    el.anonymizationStatus.textContent = `Could not save anonymization settings: ${formatError(error)}`;
+    renderConfig();
+  }
+}
+
 async function saveProject(forceSaveAs = false, options = {}) {
   el.projectActionStatus.textContent = forceSaveAs ? 'Preparing Save As...' : 'Saving project...';
   let saved = false;
@@ -5316,6 +5758,8 @@ function setView(view) {
     findings: 'Findings',
     sentTraffic: 'Sent Traffic',
     mcpLog: 'MCP Log',
+    payloadAttacks: 'Payload Attacks',
+    secrets: 'Secrets',
     scope: 'Scope',
     echo: 'Echo',
     intercept: 'Intercept',

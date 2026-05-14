@@ -30,6 +30,16 @@ const defaultConfig = {
     token: process.env.VEIL_MCP_TOKEN || '',
     requireScope: false,
     activeTesting: false,
+    anonymization: {
+      profile: 'balanced',
+      aggressivePathRedaction: false,
+      redactHosts: true,
+      redactCookieNames: true,
+      redactCookieValues: true,
+      redactAuthorization: true,
+      redactPlatformHeaders: false,
+      maxBodyChars: 256 * 1024,
+    },
   },
   upstream: {
     mode: 'direct',

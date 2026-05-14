@@ -338,7 +338,7 @@ class McpTools {
     const message = requiredText(args, 'message');
     const direction = optionalText(args, 'direction', 'auto');
     const aggressivePathRedaction = optionalBoolean(args, 'aggressivePathRedaction', false);
-    const result = this.anonymizeMessage(message, direction, { aggressivePathRedaction });
+    const result = this.anonymizeMessage(message, direction, aggressivePathRedaction ? { aggressivePathRedaction } : {});
     return toolResult({
       message: result.text,
       replacements: result.replacements,
@@ -564,6 +564,8 @@ class McpTools {
     const statusCodes = {};
     const usedSecretAliases = new Set();
     let baseline = null;
+    const attackId = makePayloadAttackId(String(id));
+    const attackStartedAt = Date.now();
 
     for (let index = 0; index < payloads.length; index += 1) {
       const payload = payloads[index];
@@ -598,13 +600,16 @@ class McpTools {
       const resolvedPayload = this.secretVault.resolveText(payload).text;
       const summary = this.attackSummary(saved, payload, resolvedPayload, index, baseline);
       baseline = baseline || summary;
+      summary.sentTrafficId = saved.id;
+      summary.interesting = isInterestingAttackResult(summary, baseline, index);
       summaries.push(summary);
       if (summary.statusCode) {
         statusCodes[summary.statusCode] = (statusCodes[summary.statusCode] || 0) + 1;
       }
-      if (includeDetails && details.length < detailLimit && isInterestingAttackResult(summary, baseline, index)) {
+      if (includeDetails && details.length < detailLimit && summary.interesting) {
         const detail = this.proxyItemResult(saved, true).structuredContent;
         detail.attackIndex = index;
+        detail.sentTrafficId = saved.id;
         detail.payloadPreview = summary.payloadPreview;
         detail.payloadReflected = summary.payloadReflected;
         detail.securitySignal = summary.securitySignal;
@@ -615,7 +620,9 @@ class McpTools {
       }
     }
 
-    return toolResult({
+    const attackCompletedAt = Date.now();
+    const result = {
+      attackId,
       sourceId: String(id),
       insertionPoint: sanitizeInsertionPoint(insertionPoint),
       payloadCount: payloads.length,
@@ -631,7 +638,31 @@ class McpTools {
       rawRequestReturned: false,
       rawResponseReturned: false,
       aliasMappings: this.aliasVault.mappingCount(),
+    };
+    this.recordPayloadAttack({
+      id: attackId,
+      sourceId: String(id),
+      method: source.request.method,
+      url: source.request.url,
+      insertionPoint: result.insertionPoint,
+      startedAt: attackStartedAt,
+      completedAt: attackCompletedAt,
+      durationMs: attackCompletedAt - attackStartedAt,
+      requestedPayloads: payloads.length,
+      executed: summaries.length,
+      sent: summaries.filter((item) => !item.error).length,
+      errors: summaries.filter((item) => item.error).length,
+      interesting: summaries.filter((item) => item.interesting).length,
+      reflectedCount: result.reflectedCount,
+      securitySignalCount: result.securitySignalCount,
+      delayMillis,
+      statusCodes,
+      results: summaries,
+      details,
+      detailsTruncated: result.detailsTruncated,
+      secretAliasesUsed: result.secretAliasesUsed,
     });
+    return toolResult(result);
   }
 
   sendProxyItemToEcho(args) {
@@ -993,6 +1024,13 @@ class McpTools {
     return this.sentTraffic.find((item) => item.sourceId === String(sourceId)) || null;
   }
 
+  recordPayloadAttack(record) {
+    if (this.proxy.addPayloadAttack) {
+      return this.proxy.addPayloadAttack(record) || record;
+    }
+    return record;
+  }
+
   history(limit, inScopeOnly) {
     return this.proxy.history.filter(isHttpFlow).filter((flow) => !inScopeOnly || this.scopeAllows(flow)).slice(0, limit);
   }
@@ -1069,11 +1107,30 @@ class McpTools {
   }
 
   anonymizeMessage(message, direction, options = {}) {
-    return this.anonymizer.anonymizeHttpMessage(this.secretVault.redactSecrets(message), direction, options);
+    return this.anonymizer.anonymizeHttpMessage(this.secretVault.redactSecrets(message), direction, {
+      ...this.anonymizationOptions(),
+      ...options,
+    });
   }
 
   anonymizeText(text) {
-    return this.anonymizer.anonymizeText(this.secretVault.redactSecrets(text)).text;
+    return this.anonymizer.anonymizeText(this.secretVault.redactSecrets(text), this.anonymizationOptions()).text;
+  }
+
+  anonymizationOptions() {
+    const options = this.mcpConfig().anonymization || {};
+    const result = {
+      aggressivePathRedaction: options.aggressivePathRedaction === true,
+      redactHosts: options.redactHosts !== false,
+      redactCookieNames: options.redactCookieNames !== false,
+      redactCookieValues: options.redactCookieValues !== false,
+      redactAuthorization: options.redactAuthorization !== false,
+      redactPlatformHeaders: options.redactPlatformHeaders === true,
+    };
+    if (Number.isFinite(Number(options.maxBodyChars))) {
+      result.maxBodyChars = Number(options.maxBodyChars);
+    }
+    return result;
   }
 }
 
@@ -1528,6 +1585,10 @@ function makeEchoId(prefix) {
 
 function makeSentTrafficId(sourceId, label) {
   return `sent-${String(sourceId || '0')}-${String(label || 'mcp').replace(/[^a-z0-9_-]/gi, '-')}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function makePayloadAttackId(sourceId) {
+  return `attack-${String(sourceId || '0').replace(/[^a-z0-9_-]/gi, '-')}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function issueFromArgs(args) {

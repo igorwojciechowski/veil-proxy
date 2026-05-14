@@ -30,6 +30,25 @@ class SecretVault {
     return this.secrets.delete(String(id || ''));
   }
 
+  setEnabled(id, enabled) {
+    const secret = this.secrets.get(String(id || ''));
+    if (!secret) {
+      return null;
+    }
+    secret.enabled = enabled === true;
+    return this.summary(secret);
+  }
+
+  regenerateAlias(id) {
+    const secret = this.secrets.get(String(id || ''));
+    if (!secret) {
+      return null;
+    }
+    secret.alias = `$secret:${secret.name}:${crypto.randomBytes(8).toString('hex')}`;
+    secret.lastUsedAt = null;
+    return this.summary(secret);
+  }
+
   clear() {
     this.secrets.clear();
   }

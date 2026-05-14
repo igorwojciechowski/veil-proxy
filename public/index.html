@@ -42,6 +42,14 @@
             <span class="nav-icon">◇</span>
             <span>MCP Log</span>
           </button>
+          <button class="nav-item" type="button" data-view="payloadAttacks" title="Payload Attacks">
+            <span class="nav-icon">⌁</span>
+            <span>Attacks</span>
+          </button>
+          <button class="nav-item" type="button" data-view="secrets" title="Secrets">
+            <span class="nav-icon">◆</span>
+            <span>Secrets</span>
+          </button>
           <button class="nav-item" type="button" data-view="scope" title="Scope">
             <span class="nav-icon">◎</span>
             <span>Scope</span>
@@ -497,6 +505,125 @@
           </div>
         </section>
 
+        <section id="payloadAttacksView" class="view">
+          <div class="payload-attacks-layout">
+            <section class="panel payload-attacks-panel">
+              <div class="panel-toolbar">
+                <div>
+                  <h2>Payload attacks</h2>
+                  <div id="payloadAttacksSubtitle" class="panel-subtitle">0 runs</div>
+                </div>
+                <button id="clearPayloadAttacksBtn" class="button ghost compact-button" type="button">Clear</button>
+              </div>
+              <div class="table-wrap payload-attacks-table-wrap">
+                <table class="traffic-table payload-attacks-table">
+                  <thead>
+                    <tr>
+                      <th>ID</th>
+                      <th>Source</th>
+                      <th>Method</th>
+                      <th>Host</th>
+                      <th>Payloads</th>
+                      <th>Interesting</th>
+                      <th>Time</th>
+                    </tr>
+                  </thead>
+                  <tbody id="payloadAttackRows"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="panel payload-attack-detail-panel">
+              <div id="emptyPayloadAttackDetail" class="empty-state">Select payload attack</div>
+              <div id="payloadAttackDetail" class="detail-content hidden">
+                <div class="detail-header">
+                  <div>
+                    <div id="payloadAttackMethod" class="method-pill">GET</div>
+                    <h2 id="payloadAttackUrl"></h2>
+                  </div>
+                  <div id="payloadAttackStatus" class="status-pill"></div>
+                </div>
+                <div class="payload-attack-detail-grid">
+                  <section class="payload-attack-summary-pane">
+                    <div class="raw-toolbar">
+                      <span>Summary</span>
+                      <button class="button ghost copy-button" type="button" data-copy-target="payloadAttackSummary">Copy</button>
+                    </div>
+                    <pre id="payloadAttackSummary" class="code-block payload-attack-summary"></pre>
+                  </section>
+                  <section class="payload-attack-results-pane">
+                    <div class="raw-toolbar">
+                      <span>Results</span>
+                      <button class="button ghost copy-button" type="button" data-copy-target="payloadAttackMeta">Copy meta</button>
+                    </div>
+                    <div class="table-wrap payload-attack-results-wrap">
+                      <table class="traffic-table payload-attack-results-table">
+                        <thead>
+                          <tr>
+                            <th>#</th>
+                            <th>Payload</th>
+                            <th>Status</th>
+                            <th>Size Δ</th>
+                            <th>Signals</th>
+                            <th>Sent</th>
+                          </tr>
+                        </thead>
+                        <tbody id="payloadAttackResultRows"></tbody>
+                      </table>
+                    </div>
+                  </section>
+                </div>
+                <pre id="payloadAttackMeta" class="code-block"></pre>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section id="secretsView" class="view">
+          <div class="secrets-layout">
+            <section class="panel secrets-panel">
+              <div class="panel-title-row">
+                <div>
+                  <h2>Secrets</h2>
+                  <div id="secretsSubtitle" class="panel-subtitle">0 aliases available to MCP</div>
+                </div>
+                <button id="refreshSecretsBtn" class="button ghost compact-button" type="button">Refresh</button>
+              </div>
+              <div class="secrets-form">
+                <label>
+                  Name
+                  <input id="secretName" type="text" autocomplete="off" placeholder="AUTH_TOKEN" />
+                </label>
+                <label>
+                  Value
+                  <input id="secretValue" type="password" autocomplete="off" />
+                </label>
+                <label class="wide">
+                  Description
+                  <input id="secretDescription" type="text" autocomplete="off" placeholder="Used for authenticated checks" />
+                </label>
+                <button id="addSecretBtn" class="button primary" type="button">Add secret</button>
+              </div>
+              <div id="secretStatus" class="hint-line">Values stay local. MCP sees aliases only.</div>
+              <div class="table-wrap secrets-table-wrap">
+                <table class="traffic-table secrets-table">
+                  <thead>
+                    <tr>
+                      <th>On</th>
+                      <th>Name</th>
+                      <th>Description</th>
+                      <th>Alias</th>
+                      <th>Last used</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="secretRows"></tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+        </section>
+
         <section id="findingsView" class="view">
           <div class="findings-layout">
             <section class="panel findings-panel">
@@ -729,6 +856,56 @@
               </div>
               <div id="mcpEndpoint" class="mcp-endpoint">MCP disabled</div>
               <div id="mcpStatus" class="hint-line">MCP returns anonymized data only. Real secret values are never returned.</div>
+            </section>
+
+            <section class="panel settings-panel anonymization-panel">
+              <div class="panel-title-row">
+                <div>
+                  <h2>Anonymization</h2>
+                  <div class="panel-subtitle">Runtime MCP redaction profile</div>
+                </div>
+                <button id="saveAnonymizationBtn" class="button primary compact-button" type="button">Save Anonymization</button>
+              </div>
+              <div class="field-grid anonymization-grid">
+                <label>
+                  Profile
+                  <select id="anonymizationProfile">
+                    <option value="balanced">Balanced pentest</option>
+                    <option value="strict">Strict privacy</option>
+                    <option value="local">Local debug</option>
+                    <option value="custom">Custom</option>
+                  </select>
+                </label>
+                <label>
+                  Max body chars
+                  <input id="anonymizationMaxBodyChars" type="number" min="4096" max="2097152" step="4096" autocomplete="off" />
+                </label>
+                <label class="inline-check settings-inline-check">
+                  <span>Redact hosts</span>
+                  <input id="anonymizationRedactHosts" type="checkbox" />
+                </label>
+                <label class="inline-check settings-inline-check">
+                  <span>Cookie names</span>
+                  <input id="anonymizationCookieNames" type="checkbox" />
+                </label>
+                <label class="inline-check settings-inline-check">
+                  <span>Cookie values</span>
+                  <input id="anonymizationCookieValues" type="checkbox" />
+                </label>
+                <label class="inline-check settings-inline-check">
+                  <span>Authorization</span>
+                  <input id="anonymizationAuthorization" type="checkbox" />
+                </label>
+                <label class="inline-check settings-inline-check">
+                  <span>Platform headers</span>
+                  <input id="anonymizationPlatformHeaders" type="checkbox" />
+                </label>
+                <label class="inline-check settings-inline-check">
+                  <span>Aggressive path</span>
+                  <input id="anonymizationAggressivePath" type="checkbox" />
+                </label>
+              </div>
+              <div id="anonymizationStatus" class="hint-line">Applies to MCP responses only. Local raw views stay unchanged.</div>
             </section>
 
             <section class="panel settings-panel upstream-rules-panel">
