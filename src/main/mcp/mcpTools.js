@@ -108,7 +108,7 @@ class McpTools {
         ),
         tool(
           'run_payload_attack',
-          'Run an Intruder-like sequential payload attack from a history request. Payloads are inserted into a query/body/cookie/header/path/raw body location. Results are anonymized.',
+          'Run an Intruder-like payload attack from a history request. Payloads are inserted into a query/body/cookie/header/path/raw body location. Results are anonymized.',
           objectSchema(
             property('id', 'string', 'Visible request id used as the base request.'),
             property('insertionPoint', 'object', 'Insertion point object: type=query|body|cookie|header|path|bodyTemplate|rawBody, name for parameter/header/cookie, optional template containing {{payload}}, optional marker.'),
@@ -121,11 +121,41 @@ class McpTools {
             property('bodyParameters', 'object', 'Optional base form body parameters before insertion.'),
             property('cookieParameters', 'object', 'Optional base cookie parameters before insertion.'),
             property('body', 'string', 'Optional base full replacement body before insertion.'),
+            property('concurrency', 'integer', 'Optional parallel request count after the baseline request, capped at 10. Defaults to 1.'),
             property('delayMillis', 'integer', 'Optional delay between requests, capped at 5000 ms. Defaults to 0.'),
             property('detailLimit', 'integer', 'Maximum detailed anonymized request/response items, capped at 20. Defaults to 5.'),
             property('includeDetails', 'boolean', 'Include anonymized request/response details for interesting items. Defaults to true.'),
           ),
           ['id', 'insertionPoint', 'payloads'],
+        ),
+        tool(
+          'list_payload_attack_runs',
+          'List locally recorded payload attack runs. URLs and payload previews are anonymized; raw traffic is never returned.',
+          objectSchema(property('limit', 'integer', 'Maximum number of runs, capped at 100. Defaults to 25.')),
+        ),
+        tool(
+          'get_payload_attack_run',
+          'Return one locally recorded payload attack run with anonymized result summaries. Raw traffic is never returned.',
+          objectSchema(property('id', 'string', 'Payload attack run id from run_payload_attack or list_payload_attack_runs.')),
+          ['id'],
+        ),
+        tool(
+          'report_payload_attack_issue',
+          'Create a local Veil Proxy finding from a payload attack result. Raw traffic is not returned through MCP.',
+          objectSchema(
+            property('id', 'string', 'Payload attack run id.'),
+            property('resultIndex', 'integer', 'Payload result index to use as evidence.'),
+            property('name', 'string', 'Optional finding name. Alias: title.'),
+            property('title', 'string', 'Optional finding title. Alias for name.'),
+            property('detail', 'string', 'Optional finding detail. Alias: description.'),
+            property('description', 'string', 'Optional finding description. Alias for detail.'),
+            property('remediation', 'string', 'Optional remediation guidance.'),
+            property('severity', 'string', 'Optional: high, medium, low, information.'),
+            property('confidence', 'string', 'Optional: certain, firm, tentative.'),
+            property('reporter', 'string', 'Optional reporter label. Defaults to Codex.'),
+            property('category', 'string', 'Optional finding category.'),
+          ),
+          ['id', 'resultIndex'],
         ),
         tool(
           'register_controlled_payload',
@@ -262,6 +292,12 @@ class McpTools {
         return this.getSentTrafficItem(args);
       case 'run_payload_attack':
         return this.runPayloadAttack(args);
+      case 'list_payload_attack_runs':
+        return this.listPayloadAttackRuns(args);
+      case 'get_payload_attack_run':
+        return this.getPayloadAttackRun(args);
+      case 'report_payload_attack_issue':
+        return this.reportPayloadAttackIssue(args);
       case 'register_controlled_payload':
         return this.registerControlledPayload(args);
       case 'clear_controlled_payloads':
@@ -557,13 +593,11 @@ class McpTools {
     }
 
     const delayMillis = clampInt(args.delayMillis, 0, 5000, 0);
+    const concurrency = clampInt(args.concurrency, 1, 10, 1);
     const detailLimit = clampInt(args.detailLimit, 0, MAX_ATTACK_DETAILS, 5);
     const includeDetails = optionalBoolean(args, 'includeDetails', true);
-    const summaries = [];
-    const details = [];
-    const statusCodes = {};
+    const prepared = [];
     const usedSecretAliases = new Set();
-    let baseline = null;
     const attackId = makePayloadAttackId(String(id));
     const attackStartedAt = Date.now();
 
@@ -593,30 +627,53 @@ class McpTools {
         return toolError(`Payload request ${index} is out of scope for source request ${id}`);
       }
 
-      const sent = await this.proxy.sendEchoRequest(resolved.request);
-      const record = sentTrafficRecord(String(id), index, sent, 'Payload attack');
-      const saved = this.recordSentTraffic(record);
-
       const resolvedPayload = this.secretVault.resolveText(payload).text;
-      const summary = this.attackSummary(saved, payload, resolvedPayload, index, baseline);
-      baseline = baseline || summary;
+      prepared.push({
+        index,
+        payload,
+        resolvedPayload,
+        request: resolved.request,
+      });
+    }
+
+    const executePayload = async (item, baseline) => {
+      const sent = await this.proxy.sendEchoRequest(item.request);
+      const record = sentTrafficRecord(String(id), item.index, sent, 'Payload attack');
+      const saved = this.recordSentTraffic(record);
+      const summary = this.attackSummary(saved, item.payload, item.resolvedPayload, item.index, baseline);
       summary.sentTrafficId = saved.id;
-      summary.interesting = isInterestingAttackResult(summary, baseline, index);
-      summaries.push(summary);
-      if (summary.statusCode) {
-        statusCodes[summary.statusCode] = (statusCodes[summary.statusCode] || 0) + 1;
-      }
-      if (includeDetails && details.length < detailLimit && summary.interesting) {
+      summary.interesting = isInterestingAttackResult(summary, baseline, item.index);
+      let detail = null;
+      if (includeDetails && summary.interesting) {
         const detail = this.proxyItemResult(saved, true).structuredContent;
-        detail.attackIndex = index;
+        detail.attackIndex = item.index;
         detail.sentTrafficId = saved.id;
         detail.payloadPreview = summary.payloadPreview;
         detail.payloadReflected = summary.payloadReflected;
         detail.securitySignal = summary.securitySignal;
-        details.push(detail);
+        return { summary, detail };
       }
-      if (delayMillis > 0 && index < payloads.length - 1) {
+      return { summary, detail };
+    };
+
+    const firstOutcome = await executePayload(prepared[0], null);
+    const baseline = firstOutcome.summary;
+    const remainingOutcomes = await runWithConcurrency(prepared.slice(1), concurrency, async (item) => {
+      if (delayMillis > 0) {
         await sleep(delayMillis);
+      }
+      return executePayload(item, baseline);
+    });
+    const outcomes = [firstOutcome, ...remainingOutcomes].sort((a, b) => a.summary.index - b.summary.index);
+    const summaries = outcomes.map((outcome) => outcome.summary);
+    const details = outcomes
+      .filter((outcome) => outcome.detail && outcome.summary.interesting)
+      .slice(0, detailLimit)
+      .map((outcome) => outcome.detail);
+    const statusCodes = {};
+    for (const summary of summaries) {
+      if (summary.statusCode) {
+        statusCodes[summary.statusCode] = (statusCodes[summary.statusCode] || 0) + 1;
       }
     }
 
@@ -627,6 +684,7 @@ class McpTools {
       insertionPoint: sanitizeInsertionPoint(insertionPoint),
       payloadCount: payloads.length,
       executed: summaries.length,
+      concurrency,
       delayMillis,
       statusCodes,
       reflectedCount: summaries.filter((item) => item.payloadReflected).length,
@@ -655,6 +713,7 @@ class McpTools {
       interesting: summaries.filter((item) => item.interesting).length,
       reflectedCount: result.reflectedCount,
       securitySignalCount: result.securitySignalCount,
+      concurrency,
       delayMillis,
       statusCodes,
       results: summaries,
@@ -663,6 +722,153 @@ class McpTools {
       secretAliasesUsed: result.secretAliasesUsed,
     });
     return toolResult(result);
+  }
+
+  listPayloadAttackRuns(args) {
+    const blocked = this.ensureScope();
+    if (blocked) return blocked;
+    const limit = clampInt(args.limit, 1, 100, 25);
+    const items = (this.proxy.listPayloadAttacks ? this.proxy.listPayloadAttacks() : [])
+      .slice(0, limit)
+      .map((record) => this.payloadAttackRunSummary(record));
+    return toolResult({
+      items,
+      count: items.length,
+      totalRecorded: this.proxy.listPayloadAttacks ? this.proxy.listPayloadAttacks().length : 0,
+      limit,
+      rawRequestReturned: false,
+      rawResponseReturned: false,
+      aliasMappings: this.aliasVault.mappingCount(),
+    });
+  }
+
+  getPayloadAttackRun(args) {
+    const blocked = this.ensureScope();
+    if (blocked) return blocked;
+    const id = requiredText(args, 'id');
+    const record = this.proxy.getPayloadAttack ? this.proxy.getPayloadAttack(id) : null;
+    if (!record) {
+      return toolError(`Payload attack run not found: ${id}`);
+    }
+    return toolResult({
+      ...this.payloadAttackRunSummary(record),
+      results: (record.results || []).map((result) => this.payloadAttackResultSummary(result)),
+      details: (record.details || []).map((detail) => this.anonymizePlainValue(detail)),
+      detailsTruncated: record.detailsTruncated === true,
+      secretAliasesUsed: record.secretAliasesUsed || [],
+      rawRequestReturned: false,
+      rawResponseReturned: false,
+      aliasMappings: this.aliasVault.mappingCount(),
+    });
+  }
+
+  reportPayloadAttackIssue(args) {
+    const blocked = this.ensureScope();
+    if (blocked) return blocked;
+    const id = requiredText(args, 'id');
+    const index = Number(args.resultIndex);
+    const record = this.proxy.getPayloadAttack ? this.proxy.getPayloadAttack(id) : null;
+    if (!record) {
+      return toolError(`Payload attack run not found: ${id}`);
+    }
+    const result = (record.results || []).find((item) => Number(item.index) === index);
+    if (!result) {
+      return toolError(`Payload attack result not found: ${id} index ${args.resultIndex}`);
+    }
+    const issue = {
+      name: optionalText(args, 'name', optionalText(args, 'title', attackIssueTitle(result))),
+      detail: optionalText(args, 'detail', optionalText(args, 'description', attackIssueDetail(result, record))),
+      remediation: optionalText(args, 'remediation', ''),
+      severity: normalizeIssueSeverity(optionalText(args, 'severity', attackIssueSeverity(result))),
+      confidence: normalizeIssueConfidence(optionalText(args, 'confidence', result.securitySignal || result.payloadReflected ? 'firm' : 'tentative')),
+      reporter: cleanEchoText(optionalText(args, 'reporter', 'Codex'), 80) || 'Codex',
+      category: cleanEchoText(optionalText(args, 'category', attackIssueCategory(result)), 80),
+    };
+    const finding = this.proxy.addReportedFinding({
+      id: `attack:${record.id}:${result.index}:${slug(issue.name)}`,
+      sourceId: record.sourceId,
+      sentTrafficId: result.sentTrafficId,
+      evidenceSource: 'payload_attack',
+      reporter: issue.reporter,
+      category: issue.category,
+      confidence: issue.confidence,
+      severity: issue.severity,
+      title: issue.name,
+      detail: issue.detail,
+      remediation: issue.remediation,
+      method: record.method,
+      url: record.url,
+      statusCode: result.statusCode,
+      evidence: [
+        `Attack: ${record.id}`,
+        `Payload index: ${result.index}`,
+        `Payload: ${result.payloadPreview || '-'}`,
+        `Signals: ${attackResultSignals(result).join(', ') || 'none'}`,
+        result.sentTrafficId ? `Sent traffic: ${result.sentTrafficId}` : '',
+      ],
+    });
+    return toolResult({
+      reported: true,
+      findingId: finding.id,
+      attackId: record.id,
+      resultIndex: result.index,
+      sentTrafficId: result.sentTrafficId,
+      name: this.anonymizeText(issue.name),
+      detail: this.anonymizeText(issue.detail),
+      severity: issue.severity,
+      confidence: issue.confidence,
+      method: record.method,
+      url: this.anonymizeText(record.url || ''),
+      statusCode: result.statusCode,
+      rawRequestReturned: false,
+      rawResponseReturned: false,
+      aliasMappings: this.aliasVault.mappingCount(),
+    });
+  }
+
+  payloadAttackRunSummary(record) {
+    return {
+      id: record.id,
+      sourceId: record.sourceId,
+      method: record.method,
+      url: this.anonymizeText(record.url || ''),
+      insertionPoint: record.insertionPoint || {},
+      startedAt: record.startedAt,
+      completedAt: record.completedAt,
+      durationMs: record.durationMs,
+      requestedPayloads: record.requestedPayloads,
+      executed: record.executed,
+      sent: record.sent,
+      errors: record.errors,
+      interesting: record.interesting,
+      reflectedCount: record.reflectedCount,
+      securitySignalCount: record.securitySignalCount,
+      concurrency: record.concurrency || 1,
+      delayMillis: record.delayMillis,
+      statusCodes: record.statusCodes || {},
+    };
+  }
+
+  payloadAttackResultSummary(result) {
+    return {
+      ...result,
+      payloadPreview: this.anonymizeText(result.payloadPreview || ''),
+      rawRequestReturned: false,
+      rawResponseReturned: false,
+    };
+  }
+
+  anonymizePlainValue(value) {
+    if (typeof value === 'string') {
+      return this.anonymizeText(value);
+    }
+    if (Array.isArray(value)) {
+      return value.map((item) => this.anonymizePlainValue(item));
+    }
+    if (value && typeof value === 'object') {
+      return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, this.anonymizePlainValue(item)]));
+    }
+    return value;
   }
 
   sendProxyItemToEcho(args) {
@@ -1139,6 +1345,9 @@ function activeOnlyTool(name) {
     'send_modified_proxy_item',
     'get_sent_traffic_item',
     'run_payload_attack',
+    'list_payload_attack_runs',
+    'get_payload_attack_run',
+    'report_payload_attack_issue',
     'register_controlled_payload',
     'clear_controlled_payloads',
     'send_proxy_item_to_echo',
@@ -1522,6 +1731,22 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function runWithConcurrency(items, concurrency, worker) {
+  const results = new Array(items.length);
+  let next = 0;
+  const count = Math.max(1, Math.min(Number(concurrency) || 1, items.length || 1));
+  await Promise.all(
+    Array.from({ length: count }, async () => {
+      while (next < items.length) {
+        const index = next;
+        next += 1;
+        results[index] = await worker(items[index], index);
+      }
+    }),
+  );
+  return results.filter(Boolean);
+}
+
 function parseCookie(value) {
   const result = new Map();
   for (const part of String(value || '').split(';')) {
@@ -1589,6 +1814,49 @@ function makeSentTrafficId(sourceId, label) {
 
 function makePayloadAttackId(sourceId) {
   return `attack-${String(sourceId || '0').replace(/[^a-z0-9_-]/gi, '-')}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function attackIssueTitle(result) {
+  if (result.securitySignal) return 'Payload triggered server-side error signal';
+  if (result.payloadReflected) return 'Payload reflected in response';
+  if (result.statusChanged) return 'Payload changed response status';
+  if (result.error) return 'Payload request produced an error';
+  return 'Interesting payload attack result';
+}
+
+function attackIssueDetail(result, record) {
+  return [
+    `Payload attack ${record.id} produced an interesting result against ${record.method || '-'} ${record.url || '-'}.`,
+    `Payload index: ${result.index}.`,
+    `Payload preview: ${result.payloadPreview || '-'}.`,
+    `Status: ${result.error ? 'ERR' : result.statusCode || '-'}.`,
+    `Duration: ${result.durationMs == null ? '-' : `${result.durationMs}ms`}.`,
+    `Response size delta: ${result.responseBytesDelta == null ? '-' : result.responseBytesDelta}.`,
+    `Signals: ${attackResultSignals(result).join(', ') || 'none'}.`,
+  ].join('\n');
+}
+
+function attackIssueCategory(result) {
+  if (result.securitySignal) return 'Injection';
+  if (result.payloadReflected) return 'Reflection';
+  if (result.statusChanged) return 'Behavior Change';
+  return 'Payload Attack';
+}
+
+function attackIssueSeverity(result) {
+  if (result.securitySignal) return 'high';
+  if (result.payloadReflected || result.statusChanged) return 'medium';
+  return 'low';
+}
+
+function attackResultSignals(result) {
+  return [
+    result.interesting ? 'interesting' : '',
+    result.statusChanged ? 'status-changed' : '',
+    result.payloadReflected ? 'payload-reflected' : '',
+    result.securitySignal ? 'security-signal' : '',
+    result.error ? 'error' : '',
+  ].filter(Boolean);
 }
 
 function issueFromArgs(args) {

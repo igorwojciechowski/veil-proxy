@@ -515,6 +515,22 @@
                 </div>
                 <button id="clearPayloadAttacksBtn" class="button ghost compact-button" type="button">Clear</button>
               </div>
+              <div class="payload-attack-filter-bar">
+                <label>
+                  Search
+                  <input id="payloadAttackSearch" class="search-input" type="search" placeholder="ID, host, path, insertion" />
+                </label>
+                <label>
+                  Sort
+                  <select id="payloadAttackSort">
+                    <option value="startedAt:desc">Newest</option>
+                    <option value="durationMs:desc">Slowest</option>
+                    <option value="interesting:desc">Most interesting</option>
+                    <option value="errors:desc">Most errors</option>
+                    <option value="reflectedCount:desc">Most reflected</option>
+                  </select>
+                </label>
+              </div>
               <div class="table-wrap payload-attacks-table-wrap">
                 <table class="traffic-table payload-attacks-table">
                   <thead>
@@ -554,7 +570,28 @@
                   <section class="payload-attack-results-pane">
                     <div class="raw-toolbar">
                       <span>Results</span>
-                      <button class="button ghost copy-button" type="button" data-copy-target="payloadAttackMeta">Copy meta</button>
+                      <div class="payload-result-tools">
+                        <label>
+                          View
+                          <select id="payloadAttackResultFilter">
+                            <option value="all">All</option>
+                            <option value="interesting">Interesting</option>
+                            <option value="reflected">Reflected</option>
+                            <option value="security">Security signals</option>
+                            <option value="errors">Errors</option>
+                          </select>
+                        </label>
+                        <label>
+                          Sort
+                          <select id="payloadAttackResultSort">
+                            <option value="index:asc">Index</option>
+                            <option value="durationMs:desc">Slowest</option>
+                            <option value="responseBytesDelta:desc">Largest delta</option>
+                            <option value="statusCode:asc">Status</option>
+                          </select>
+                        </label>
+                        <button class="button ghost copy-button" type="button" data-copy-target="payloadAttackMeta">Copy meta</button>
+                      </div>
                     </div>
                     <div class="table-wrap payload-attack-results-wrap">
                       <table class="traffic-table payload-attack-results-table">
@@ -566,6 +603,7 @@
                             <th>Size Δ</th>
                             <th>Signals</th>
                             <th>Sent</th>
+                            <th>Finding</th>
                           </tr>
                         </thead>
                         <tbody id="payloadAttackResultRows"></tbody>
@@ -981,6 +1019,7 @@
       <button id="removeFromScopeContextBtn" type="button" role="menuitem">Remove from scope</button>
     </div>
 
+    <script src="/attacksView.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

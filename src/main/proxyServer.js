@@ -1904,6 +1904,7 @@ function sanitizePayloadAttack(record) {
     interesting: Number(record.interesting || results.filter((item) => item.interesting).length || 0),
     reflectedCount: Number(record.reflectedCount || results.filter((item) => item.payloadReflected).length || 0),
     securitySignalCount: Number(record.securitySignalCount || results.filter((item) => item.securitySignal).length || 0),
+    concurrency: Number(record.concurrency || 1),
     delayMillis: Number(record.delayMillis || 0),
     statusCodes: record.statusCodes && typeof record.statusCodes === 'object' ? structuredClone(record.statusCodes) : {},
     detailsTruncated: record.detailsTruncated === true,
@@ -1953,6 +1954,7 @@ function payloadAttackSummary(record) {
     interesting: record.interesting,
     reflectedCount: record.reflectedCount,
     securitySignalCount: record.securitySignalCount,
+    concurrency: record.concurrency || 1,
     delayMillis: record.delayMillis,
     statusCodes: record.statusCodes || {},
   };

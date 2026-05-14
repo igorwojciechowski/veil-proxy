@@ -494,6 +494,51 @@ h2 {
   overflow: hidden;
 }
 
+.payload-attack-filter-bar {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(150px, 0.48fr);
+  gap: 10px;
+  border-bottom: 1px solid rgba(48, 243, 217, 0.14);
+  padding: 12px;
+}
+
+.payload-attack-filter-bar label,
+.payload-result-tools label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.payload-attack-filter-bar input,
+.payload-attack-filter-bar select,
+.payload-result-tools select {
+  min-width: 0;
+  border: 1px solid rgba(48, 243, 217, 0.34);
+  border-radius: 8px;
+  background: rgba(1, 17, 19, 0.82);
+  color: var(--text);
+  padding: 8px 10px;
+  font: inherit;
+}
+
+.payload-result-tools {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: end;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.payload-result-tools label {
+  width: 142px;
+  letter-spacing: 0.04em;
+}
+
 .secrets-layout {
   height: 100%;
   overflow: hidden;
@@ -631,6 +676,11 @@ h2 {
 .payload-attack-results-table th:nth-child(6),
 .payload-attack-results-table td:nth-child(6) {
   width: 110px;
+}
+
+.payload-attack-results-table th:nth-child(7),
+.payload-attack-results-table td:nth-child(7) {
+  width: 92px;
 }
 
 .payload-attack-results-table code {

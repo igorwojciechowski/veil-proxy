@@ -1208,6 +1208,8 @@ test('MCP run_payload_attack sends payload variants and returns anonymized resul
       params: {},
     });
     assert.equal(listed.result.tools.some((tool) => tool.name === 'run_payload_attack'), true);
+    assert.equal(listed.result.tools.some((tool) => tool.name === 'list_payload_attack_runs'), true);
+    assert.equal(listed.result.tools.some((tool) => tool.name === 'report_payload_attack_issue'), true);
 
     const sourceId = app.proxy.listHistory()[0].id;
     const attack = await mcpToolCall(app, 'run_payload_attack', {
@@ -1217,6 +1219,7 @@ test('MCP run_payload_attack sends payload variants and returns anonymized resul
         name: 'q',
       },
       payloads: ['baseline', 'VEILCANARY-attack', secret.alias],
+      concurrency: 2,
       includeDetails: true,
       detailLimit: 3,
     });
@@ -1225,6 +1228,7 @@ test('MCP run_payload_attack sends payload variants and returns anonymized resul
 
     assert.equal(structured.executed, 3);
     assert.equal(structured.payloadCount, 3);
+    assert.equal(structured.concurrency, 2);
     assert.equal(typeof structured.attackId, 'string');
     assert.equal(structured.results.length, 3);
     assert.equal(structured.reflectedCount, 3);
@@ -1241,6 +1245,7 @@ test('MCP run_payload_attack sends payload variants and returns anonymized resul
     assert.equal(attackRuns[0].id, structured.attackId);
     assert.equal(attackRuns[0].sourceId, sourceId);
     assert.equal(attackRuns[0].executed, 3);
+    assert.equal(attackRuns[0].concurrency, 2);
     assert.equal(attackRuns[0].reflectedCount, 3);
 
     const attackDetail = await apiRequest(app.api.port, `/api/payload-attacks/${encodeURIComponent(structured.attackId)}`);
@@ -1248,6 +1253,27 @@ test('MCP run_payload_attack sends payload variants and returns anonymized resul
     assert.equal(attackDetail.results.every((item) => item.sentTrafficId), true);
     assert.equal(attackDetail.secretAliasesUsed.includes(secret.alias), true);
     assert.equal(JSON.stringify(attackDetail).includes('attack-secret-1234567890'), false);
+
+    const listedRuns = await mcpToolCall(app, 'list_payload_attack_runs', { limit: 10 });
+    assert.equal(listedRuns.result.structuredContent.items.some((item) => item.id === structured.attackId), true);
+    assert.equal(JSON.stringify(listedRuns).includes(`127.0.0.1:${origin.port}`), false);
+    const runDetail = await mcpToolCall(app, 'get_payload_attack_run', { id: structured.attackId });
+    assert.equal(runDetail.result.structuredContent.results.length, 3);
+    assert.equal(JSON.stringify(runDetail).includes('attack-secret-1234567890'), false);
+    const attackReported = await mcpToolCall(app, 'report_payload_attack_issue', {
+      id: structured.attackId,
+      resultIndex: 2,
+    });
+    assert.equal(attackReported.result.structuredContent.reported, true);
+    assert.equal(attackReported.result.structuredContent.sentTrafficId, attackDetail.results[2].sentTrafficId);
+    assert.equal(JSON.stringify(attackReported).includes('attack-secret-1234567890'), false);
+
+    const finding = await apiRequest(app.api.port, `/api/payload-attacks/${encodeURIComponent(structured.attackId)}/findings`, 'POST', {
+      resultIndex: 1,
+    });
+    assert.equal(finding.evidenceSource, 'payload_attack');
+    assert.equal(finding.sentTrafficId, attackDetail.results[1].sentTrafficId);
+    assert.equal((await apiRequest(app.api.port, '/api/findings')).some((item) => item.id === finding.id), true);
   } finally {
     await app.stop();
     await origin.close();

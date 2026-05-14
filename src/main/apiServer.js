@@ -273,6 +273,18 @@ class ApiServer {
         return;
       }
 
+      const payloadAttackFindingMatch = parsed.pathname.match(/^\/api\/payload-attacks\/([^/]+)\/findings$/);
+      if (payloadAttackFindingMatch && req.method === 'POST') {
+        const body = await readJson(req);
+        const finding = this.createPayloadAttackFinding(decodeURIComponent(payloadAttackFindingMatch[1]), body);
+        if (!finding) {
+          this.notFound(res);
+          return;
+        }
+        this.json(res, finding);
+        return;
+      }
+
       const payloadAttackMatch = parsed.pathname.match(/^\/api\/payload-attacks\/([^/]+)$/);
       if (payloadAttackMatch && req.method === 'GET') {
         const record = this.proxy.getPayloadAttack ? this.proxy.getPayloadAttack(decodeURIComponent(payloadAttackMatch[1])) : null;
@@ -529,6 +541,43 @@ class ApiServer {
     });
   }
 
+  createPayloadAttackFinding(attackId, body = {}) {
+    const attack = this.proxy.getPayloadAttack ? this.proxy.getPayloadAttack(attackId) : null;
+    if (!attack || !this.proxy.addReportedFinding) {
+      return null;
+    }
+    const index = Number(body.resultIndex);
+    const result = (attack.results || []).find((item) => Number(item.index) === index);
+    if (!result) {
+      return null;
+    }
+    const title = body.title || attackFindingTitle(result, attack);
+    const detail = body.detail || attackFindingDetail(result, attack);
+    return this.proxy.addReportedFinding({
+      id: `attack:${attack.id}:${result.index}:${slug(title)}`,
+      sourceId: attack.sourceId,
+      sentTrafficId: result.sentTrafficId,
+      evidenceSource: 'payload_attack',
+      reporter: body.reporter || 'Veil Proxy',
+      category: body.category || attackFindingCategory(result),
+      severity: body.severity || attackFindingSeverity(result),
+      confidence: body.confidence || (result.payloadReflected || result.securitySignal ? 'firm' : 'tentative'),
+      title,
+      detail,
+      remediation: body.remediation || '',
+      method: attack.method,
+      url: attack.url,
+      statusCode: result.statusCode,
+      evidence: [
+        `Attack: ${attack.id}`,
+        `Payload index: ${result.index}`,
+        `Payload: ${result.payloadPreview || '-'}`,
+        `Signals: ${attackResultSignals(result).join(', ') || 'none'}`,
+        result.sentTrafficId ? `Sent traffic: ${result.sentTrafficId}` : '',
+      ],
+    });
+  }
+
   broadcast(event, payload) {
     for (const client of this.clients) {
       client.write(event, payload);
@@ -737,6 +786,58 @@ function searchPreview(value, terms) {
   const start = Math.max(0, center - 80);
   const end = Math.min(text.length, center + 160);
   return `${start > 0 ? '...' : ''}${text.slice(start, end)}${end < text.length ? '...' : ''}`;
+}
+
+function attackFindingTitle(result, attack) {
+  if (result.securitySignal) return 'Payload triggered server-side error signal';
+  if (result.payloadReflected) return 'Payload reflected in response';
+  if (result.statusChanged) return 'Payload changed response status';
+  if (result.error) return 'Payload request produced an error';
+  return 'Interesting payload attack result';
+}
+
+function attackFindingDetail(result, attack) {
+  const signals = attackResultSignals(result);
+  return [
+    `Payload attack ${attack.id} produced an interesting result against ${attack.method || '-'} ${attack.url || '-'}.`,
+    `Payload index: ${result.index}.`,
+    `Payload preview: ${result.payloadPreview || '-'}.`,
+    `Status: ${result.error ? 'ERR' : result.statusCode || '-'}.`,
+    `Duration: ${result.durationMs == null ? '-' : `${result.durationMs}ms`}.`,
+    `Response size delta: ${result.responseBytesDelta == null ? '-' : result.responseBytesDelta}.`,
+    `Signals: ${signals.join(', ') || 'none'}.`,
+  ].join('\n');
+}
+
+function attackFindingCategory(result) {
+  if (result.securitySignal) return 'Injection';
+  if (result.payloadReflected) return 'Reflection';
+  if (result.statusChanged) return 'Behavior Change';
+  return 'Payload Attack';
+}
+
+function attackFindingSeverity(result) {
+  if (result.securitySignal) return 'high';
+  if (result.payloadReflected || result.statusChanged) return 'medium';
+  return 'low';
+}
+
+function attackResultSignals(result) {
+  return [
+    result.interesting ? 'interesting' : '',
+    result.statusChanged ? 'status-changed' : '',
+    result.payloadReflected ? 'payload-reflected' : '',
+    result.securitySignal ? 'security-signal' : '',
+    result.error ? 'error' : '',
+  ].filter(Boolean);
+}
+
+function slug(value) {
+  return String(value || 'finding')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80) || 'finding';
 }
 
 function reportedFindingsFromSnapshot(findings) {

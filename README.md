@@ -64,7 +64,8 @@ MCP tools return anonymized traffic only. Real hosts, cookies, authorization val
 When `Active testing` is enabled in MCP settings, Veil Proxy also exposes active tools:
 
 - `send_modified_proxy_item` for one-off modified requests.
-- `run_payload_attack` for Intruder-like sequential payload attacks against query, body, cookie, header, path, or raw body insertion points. Payload attack results include anonymized summaries, reflection/security-signal flags, and limited anonymized details.
+- `run_payload_attack` for Intruder-like payload attacks against query, body, cookie, header, path, or raw body insertion points, with optional bounded concurrency. Payload attack results include anonymized summaries, reflection/security-signal flags, and limited anonymized details.
+- `list_payload_attack_runs`, `get_payload_attack_run`, and `report_payload_attack_issue` for reviewing attack runs and creating local findings from specific payload results without returning raw traffic.
 - `register_controlled_payload` and `clear_controlled_payloads` for operator-controlled canary/payload evidence. Reflections are returned as sanitized evidence snippets, including URL/HTML-decoded variants.
 - `send_proxy_item_to_echo` and `send_random_proxy_item_to_echo` for copying captured requests into local Echo tabs or groups without returning raw traffic through MCP.
 - `report_proxy_item_issue`, `report_sent_traffic_issue`, and `report_modified_proxy_item_issue` for creating local Veil Proxy findings from captured or MCP-sent evidence.
@@ -72,7 +73,7 @@ When `Active testing` is enabled in MCP settings, Veil Proxy also exposes active
 
 MCP-sent requests are stored locally in the `Sent` view and in project snapshots. The local UI can inspect raw sent request/response evidence; MCP clients only receive anonymized output through tools such as `get_sent_traffic_item`.
 
-The `Attacks` view records `run_payload_attack` runs locally with payload counts, status-code distributions, interesting/reflected/security-signal flags, and links to the generated `Sent` requests. Attack run history is included in project save/load snapshots.
+The `Attacks` view records `run_payload_attack` runs locally with payload counts, status-code distributions, interesting/reflected/security-signal flags, filters/sorting for run results, links to the generated `Sent` requests, and one-click finding creation from interesting payload results. Attack run history is included in project save/load snapshots.
 
 The `MCP Log` view records local JSON-RPC exchanges with request/response payloads for operator debugging. Authorization headers are not stored in the log, and the log is never exposed through MCP tools.
 

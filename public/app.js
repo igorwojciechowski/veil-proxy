@@ -79,6 +79,10 @@ const state = {
   payloadAttacks: [],
   selectedPayloadAttackId: null,
   selectedPayloadAttack: null,
+  payloadAttackSearch: '',
+  payloadAttackSort: 'startedAt:desc',
+  payloadAttackResultFilter: 'all',
+  payloadAttackResultSort: 'index:asc',
   selectedMcpExchangeId: null,
   selectedMcpExchange: null,
   echoTabs: [],
@@ -177,6 +181,10 @@ const el = {
   payloadAttackSummary: document.querySelector('#payloadAttackSummary'),
   payloadAttackResultRows: document.querySelector('#payloadAttackResultRows'),
   payloadAttackMeta: document.querySelector('#payloadAttackMeta'),
+  payloadAttackSearch: document.querySelector('#payloadAttackSearch'),
+  payloadAttackSort: document.querySelector('#payloadAttackSort'),
+  payloadAttackResultFilter: document.querySelector('#payloadAttackResultFilter'),
+  payloadAttackResultSort: document.querySelector('#payloadAttackResultSort'),
   secretsSubtitle: document.querySelector('#secretsSubtitle'),
   secretName: document.querySelector('#secretName'),
   secretValue: document.querySelector('#secretValue'),
@@ -355,6 +363,19 @@ const SCOPE_PRESETS = {
   custom: { label: 'Custom', field: 'url', operator: 'contains' },
 };
 
+const payloadAttacksView = window.VeilPayloadAttacks?.create({
+  state,
+  el,
+  api,
+  escapeHtml,
+  markProjectDirty,
+  setView,
+  loadSentTraffic,
+  renderFindings,
+  renderMeta,
+  shortSentId,
+});
+
 window.addEventListener('pagehide', () => {
   flushEchoState();
   flushTrafficPresets();
@@ -510,18 +531,7 @@ function bindUi() {
     await loadSentTraffic(row.dataset.sentTrafficId);
   });
   el.clearSentTrafficBtn?.addEventListener('click', clearSentTraffic);
-  el.payloadAttackRows?.addEventListener('click', async (event) => {
-    const row = event.target.closest('[data-payload-attack-id]');
-    if (!row) return;
-    await loadPayloadAttack(row.dataset.payloadAttackId);
-  });
-  el.payloadAttackResultRows?.addEventListener('click', async (event) => {
-    const button = event.target.closest('[data-sent-traffic-id-link]');
-    if (!button) return;
-    await loadSentTraffic(button.dataset.sentTrafficIdLink);
-    setView('sentTraffic');
-  });
-  el.clearPayloadAttacksBtn?.addEventListener('click', clearPayloadAttacks);
+  payloadAttacksView?.bind();
   el.mcpLogRows?.addEventListener('click', async (event) => {
     const row = event.target.closest('[data-mcp-exchange-id]');
     if (!row) return;
@@ -738,7 +748,7 @@ function openEvents() {
       state.selectedPayloadAttackId = null;
       state.selectedPayloadAttack = null;
     }
-    renderPayloadAttacks();
+    payloadAttacksView?.render();
     markProjectDirty();
   });
   events.addEventListener('mcp-exchanges', (event) => {
@@ -836,7 +846,7 @@ function renderAll(options = {}) {
   renderGlobalSearch();
   renderFindings();
   renderSentTraffic();
-  renderPayloadAttacks();
+  payloadAttacksView?.render();
   renderMcpLog();
   renderSecrets();
   renderEcho();
@@ -2573,153 +2583,6 @@ function shortSentId(id) {
 
 function shortToolName(tool) {
   return String(tool || 'mcp').replace(/^send_/, '').replace(/_proxy_item|_item/g, '').replace(/_/g, ' ');
-}
-
-function renderPayloadAttacks() {
-  if (!el.payloadAttackRows) return;
-  const records = Array.isArray(state.payloadAttacks) ? state.payloadAttacks : [];
-  el.payloadAttacksSubtitle.textContent = `${records.length} ${records.length === 1 ? 'run' : 'runs'}`;
-  el.clearPayloadAttacksBtn.disabled = records.length === 0;
-  el.payloadAttackRows.innerHTML =
-    records
-      .map((record) => {
-        const rowClass = record.id === state.selectedPayloadAttackId ? 'selected' : '';
-        const payloads = `${record.executed || 0}/${record.requestedPayloads || 0}`;
-        const interesting = `${record.interesting || 0}${record.errors ? `, ${record.errors} err` : ''}`;
-        return `
-          <tr class="${rowClass}" data-payload-attack-id="${escapeHtml(record.id)}">
-            <td title="${escapeHtml(record.id)}">${escapeHtml(shortAttackId(record.id))}</td>
-            <td>${escapeHtml(record.sourceId ? `#${record.sourceId}` : '-')}</td>
-            <td><span class="method-pill small">${escapeHtml(record.method || '-')}</span></td>
-            <td title="${escapeHtml(record.host || '')}">${escapeHtml(record.host || '-')}</td>
-            <td>${escapeHtml(payloads)}</td>
-            <td><span class="status-pill ${record.errors ? 'error' : ''}">${escapeHtml(interesting)}</span></td>
-            <td>${escapeHtml(record.durationMs == null ? '-' : `${record.durationMs}ms`)}</td>
-          </tr>
-        `;
-      })
-      .join('') || '<tr><td colspan="7"><div class="empty-state compact-empty">No payload attack runs yet</div></td></tr>';
-
-  renderPayloadAttackDetail();
-}
-
-async function loadPayloadAttack(id) {
-  state.selectedPayloadAttackId = id;
-  state.selectedPayloadAttack = await api(`/api/payload-attacks/${encodeURIComponent(id)}`);
-  renderPayloadAttacks();
-}
-
-function renderPayloadAttackDetail() {
-  if (!el.payloadAttackDetail) return;
-  const record = state.selectedPayloadAttack;
-  if (!record) {
-    el.emptyPayloadAttackDetail.classList.remove('hidden');
-    el.payloadAttackDetail.classList.add('hidden');
-    return;
-  }
-
-  const results = Array.isArray(record.results) ? record.results : [];
-  el.emptyPayloadAttackDetail.classList.add('hidden');
-  el.payloadAttackDetail.classList.remove('hidden');
-  el.payloadAttackMethod.textContent = record.method || '-';
-  el.payloadAttackUrl.textContent = record.url || '';
-  el.payloadAttackStatus.textContent = `${record.interesting || 0} interesting`;
-  el.payloadAttackStatus.classList.toggle('error', Boolean(record.errors));
-  el.payloadAttackSummary.textContent = payloadAttackSummaryText(record);
-  el.payloadAttackResultRows.innerHTML =
-    results
-      .map((result) => {
-        const signals = [
-          result.interesting ? 'interesting' : '',
-          result.statusChanged ? 'status' : '',
-          result.payloadReflected ? 'reflected' : '',
-          result.securitySignal ? 'security' : '',
-          result.error ? 'error' : '',
-        ].filter(Boolean);
-        return `
-          <tr class="${result.error ? 'error-row' : ''}">
-            <td>${escapeHtml(String(result.index ?? '-'))}</td>
-            <td title="${escapeHtml(result.payloadPreview || '')}"><code>${escapeHtml(result.payloadPreview || '-')}</code></td>
-            <td><span class="status-pill ${result.error ? 'error' : ''}">${escapeHtml(result.error ? 'ERR' : String(result.statusCode || '-'))}</span></td>
-            <td>${escapeHtml(result.responseBytesDelta == null ? '-' : signedNumber(result.responseBytesDelta))}</td>
-            <td>${signals.map((signal) => `<span class="mini-chip">${escapeHtml(signal)}</span>`).join('') || '-'}</td>
-            <td>${
-              result.sentTrafficId
-                ? `<button class="button ghost compact-button" type="button" data-sent-traffic-id-link="${escapeHtml(result.sentTrafficId)}">${escapeHtml(shortSentId(result.sentTrafficId))}</button>`
-                : '-'
-            }</td>
-          </tr>
-        `;
-      })
-      .join('') || '<tr><td colspan="6"><div class="empty-state compact-empty">No payload results</div></td></tr>';
-  el.payloadAttackMeta.textContent = JSON.stringify(
-    {
-      id: record.id,
-      sourceId: record.sourceId,
-      insertionPoint: record.insertionPoint || {},
-      startedAt: record.startedAt ? new Date(record.startedAt).toISOString() : null,
-      completedAt: record.completedAt ? new Date(record.completedAt).toISOString() : null,
-      statusCodes: record.statusCodes || {},
-      secretAliasesUsed: record.secretAliasesUsed || [],
-      detailsTruncated: record.detailsTruncated === true,
-      details: record.details || [],
-    },
-    null,
-    2,
-  );
-}
-
-async function clearPayloadAttacks() {
-  if (!state.payloadAttacks.length) return;
-  if (!window.confirm('Clear payload attack run history? Sent traffic will stay intact.')) {
-    return;
-  }
-  state.payloadAttacks = await api('/api/payload-attacks', { method: 'DELETE' });
-  state.selectedPayloadAttackId = null;
-  state.selectedPayloadAttack = null;
-  renderPayloadAttacks();
-  markProjectDirty();
-}
-
-function payloadAttackSummaryText(record) {
-  return [
-    `Attack ID: ${record.id || '-'}`,
-    `Source: ${record.sourceId ? `#${record.sourceId}` : '-'}`,
-    `Target: ${record.method || '-'} ${record.url || '-'}`,
-    `Insertion: ${insertionPointLabel(record.insertionPoint)}`,
-    `Payloads: ${record.executed || 0}/${record.requestedPayloads || 0}`,
-    `Sent: ${record.sent || 0}`,
-    `Errors: ${record.errors || 0}`,
-    `Interesting: ${record.interesting || 0}`,
-    `Reflected: ${record.reflectedCount || 0}`,
-    `Security signals: ${record.securitySignalCount || 0}`,
-    `Delay: ${record.delayMillis || 0}ms`,
-    `Duration: ${record.durationMs == null ? '-' : `${record.durationMs}ms`}`,
-    `Status codes: ${statusCodesLabel(record.statusCodes)}`,
-    `Secrets: ${(record.secretAliasesUsed || []).join(', ') || '-'}`,
-  ].join('\n');
-}
-
-function insertionPointLabel(point) {
-  if (!point || typeof point !== 'object') return '-';
-  const parts = [point.type, point.name, point.marker ? `marker ${point.marker}` : '', point.hasTemplate ? 'template' : ''].filter(Boolean);
-  return parts.join(' / ') || '-';
-}
-
-function statusCodesLabel(statusCodes) {
-  const entries = Object.entries(statusCodes || {});
-  return entries.length ? entries.map(([code, count]) => `${code}:${count}`).join(', ') : '-';
-}
-
-function signedNumber(value) {
-  const number = Number(value || 0);
-  return number > 0 ? `+${number}` : String(number);
-}
-
-function shortAttackId(id) {
-  const text = String(id || '');
-  const match = text.match(/^attack-([^-]+)-/);
-  return match ? `#${match[1]}` : text.slice(0, 18);
 }
 
 function renderMcpLog() {
