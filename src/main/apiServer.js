@@ -40,6 +40,15 @@ class ApiServer {
     this.proxy.on('pending', (items) => this.broadcast('pending', items));
     this.proxy.on('config', (nextConfig) => this.broadcast('config', nextConfig));
     this.proxy.on('findings', (findings) => this.broadcast('findings', findings));
+    this.proxy.on('sent-traffic', (items) => this.broadcast('sent-traffic', items));
+    if (this.mcp && typeof this.mcp.on === 'function') {
+      this.mcp.on('mcp-exchanges', (items) => {
+        if (this.store && this.mcp.exchanges) {
+          this.store.setMcpExchanges(this.mcp.exchanges);
+        }
+        this.broadcast('mcp-exchanges', items);
+      });
+    }
   }
 
   start() {
@@ -94,6 +103,27 @@ class ApiServer {
 
       if (parsed.pathname === '/api/mcp/secrets' && req.method === 'GET') {
         this.json(res, this.mcp ? this.mcp.secretVault.list() : []);
+        return;
+      }
+
+      if (parsed.pathname === '/api/mcp/exchanges' && req.method === 'GET') {
+        this.json(res, this.mcp && this.mcp.listExchanges ? this.mcp.listExchanges() : []);
+        return;
+      }
+
+      if (parsed.pathname === '/api/mcp/exchanges' && req.method === 'DELETE') {
+        this.json(res, this.mcp && this.mcp.clearExchanges ? this.mcp.clearExchanges() : []);
+        return;
+      }
+
+      const mcpExchangeMatch = parsed.pathname.match(/^\/api\/mcp\/exchanges\/([^/]+)$/);
+      if (mcpExchangeMatch && req.method === 'GET') {
+        const exchange = this.mcp && this.mcp.getExchange ? this.mcp.getExchange(decodeURIComponent(mcpExchangeMatch[1])) : null;
+        if (!exchange) {
+          this.notFound(res);
+          return;
+        }
+        this.json(res, exchange);
         return;
       }
 
@@ -181,6 +211,27 @@ class ApiServer {
 
       if (parsed.pathname === '/api/findings' && req.method === 'GET') {
         this.json(res, this.proxy.getFindings());
+        return;
+      }
+
+      if (parsed.pathname === '/api/sent-traffic' && req.method === 'GET') {
+        this.json(res, this.proxy.listSentTraffic ? this.proxy.listSentTraffic() : []);
+        return;
+      }
+
+      if (parsed.pathname === '/api/sent-traffic' && req.method === 'DELETE') {
+        this.json(res, this.proxy.clearSentTraffic ? this.proxy.clearSentTraffic() : []);
+        return;
+      }
+
+      const sentTrafficMatch = parsed.pathname.match(/^\/api\/sent-traffic\/([^/]+)$/);
+      if (sentTrafficMatch && req.method === 'GET') {
+        const record = this.proxy.getSentTrafficRecord ? this.proxy.getSentTrafficRecord(decodeURIComponent(sentTrafficMatch[1])) : null;
+        if (!record) {
+          this.notFound(res);
+          return;
+        }
+        this.json(res, record);
         return;
       }
 
@@ -277,6 +328,8 @@ class ApiServer {
       config: this.proxy.getConfig(),
       history: this.proxy.listHistory(),
       pending: this.proxy.listPending(),
+      sentTraffic: this.proxy.listSentTraffic ? this.proxy.listSentTraffic() : [],
+      mcpExchanges: this.mcp && this.mcp.listExchanges ? this.mcp.listExchanges() : [],
       proxyPort: this.proxy.port,
       apiPort: this.port,
       mcp: this.mcp ? this.mcp.state() : null,
@@ -319,11 +372,15 @@ class ApiServer {
           ui: this.getUiState(),
           history: this.proxy.history || [],
           reportedFindings: this.proxy.getReportedFindings ? this.proxy.getReportedFindings() : [],
+          sentTraffic: this.proxy.getSentTraffic ? this.proxy.getSentTraffic() : [],
+          mcpExchanges: this.mcp && this.mcp.exchanges ? this.mcp.exchanges : [],
         };
     return {
       ...data,
       findings: this.proxy.getFindings(),
       reportedFindings: this.proxy.getReportedFindings ? this.proxy.getReportedFindings() : data.reportedFindings || [],
+      sentTraffic: this.proxy.getSentTraffic ? this.proxy.getSentTraffic() : data.sentTraffic || [],
+      mcpExchanges: this.mcp && this.mcp.exchanges ? this.mcp.exchanges : data.mcpExchanges || [],
     };
   }
 
@@ -344,6 +401,12 @@ class ApiServer {
     if (this.proxy.replaceReportedFindings) {
       this.proxy.replaceReportedFindings(data?.reportedFindings || reportedFindingsFromSnapshot(data?.findings));
     }
+    if (this.proxy.replaceSentTraffic) {
+      this.proxy.replaceSentTraffic(data?.sentTraffic || []);
+    }
+    if (this.mcp && this.mcp.replaceExchanges) {
+      this.mcp.replaceExchanges(data?.mcpExchanges || []);
+    }
 
     const nextUi = data?.ui && typeof data.ui === 'object' ? data.ui : {};
     this.memoryUiState = {
@@ -357,6 +420,8 @@ class ApiServer {
         ui: this.memoryUiState,
         history: this.proxy.history,
         reportedFindings: this.proxy.getReportedFindings ? this.proxy.getReportedFindings() : [],
+        sentTraffic: this.proxy.getSentTraffic ? this.proxy.getSentTraffic() : [],
+        mcpExchanges: this.mcp && this.mcp.exchanges ? this.mcp.exchanges : [],
       });
     }
 
@@ -367,6 +432,12 @@ class ApiServer {
     this.proxy.replaceHistory([], { persist: false });
     if (this.proxy.replaceReportedFindings) {
       this.proxy.replaceReportedFindings([]);
+    }
+    if (this.proxy.replaceSentTraffic) {
+      this.proxy.replaceSentTraffic([]);
+    }
+    if (this.mcp && this.mcp.replaceExchanges) {
+      this.mcp.replaceExchanges([]);
     }
     this.memoryUiState = {
       echo: defaultEchoUiState(),
@@ -379,6 +450,8 @@ class ApiServer {
         ui: this.memoryUiState,
         history: [],
         reportedFindings: [],
+        sentTraffic: [],
+        mcpExchanges: [],
       });
     }
 

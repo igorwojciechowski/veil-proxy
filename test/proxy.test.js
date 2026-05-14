@@ -854,6 +854,94 @@ test('serves MCP tool calls with anonymized HTTP output', async () => {
   }
 });
 
+test('records local MCP exchanges without exposing authorization headers', async () => {
+  const app = createApp({
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+      mcp: {
+        enabled: true,
+        port: 0,
+        token: 'test-token',
+      },
+    },
+  });
+
+  await app.start();
+
+  try {
+    const response = await mcpToolCall(app, 'anonymize_http', {
+      message: 'GET / HTTP/1.1\r\nHost: private.example.com\r\n\r\n',
+    });
+    assert.equal(response.result.structuredContent.message.includes('private.example.com'), false);
+
+    const exchanges = await apiRequest(app.api.port, '/api/mcp/exchanges');
+    assert.equal(exchanges.length, 1);
+    assert.equal(exchanges[0].rpcMethod, 'tools/call');
+    assert.equal(exchanges[0].tool, 'anonymize_http');
+    assert.equal(JSON.stringify(exchanges).includes('test-token'), false);
+
+    const full = await apiRequest(app.api.port, `/api/mcp/exchanges/${encodeURIComponent(exchanges[0].id)}`);
+    assert.equal(full.request.params.name, 'anonymize_http');
+    assert.equal(full.response.result.structuredContent.rawRequestReturned, undefined);
+    assert.equal(JSON.stringify(full).includes('test-token'), false);
+
+    const cleared = await apiRequest(app.api.port, '/api/mcp/exchanges', 'DELETE');
+    assert.equal(cleared.length, 0);
+  } finally {
+    await app.stop();
+  }
+});
+
+test('MCP controlled payloads return sanitized reflection evidence', async () => {
+  const app = createApp({
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+      mcp: {
+        enabled: true,
+        port: 0,
+        token: 'test-token',
+        activeTesting: true,
+      },
+    },
+  });
+
+  await app.start();
+
+  try {
+    const listed = await mcpRpc(app, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/list',
+      params: {},
+    });
+    assert.equal(listed.result.tools.some((tool) => tool.name === 'register_controlled_payload'), true);
+
+    const registered = await mcpToolCall(app, 'register_controlled_payload', {
+      payload: `alert('VEILCANARY-alpha')`,
+    });
+    assert.equal(registered.result.structuredContent.registered, true);
+    assert.equal(registered.result.structuredContent.rawPayloadReturned, false);
+    assert.equal(registered.result.structuredContent.canaries.includes('VEILCANARY-alpha'), true);
+
+    const reflected = await mcpToolCall(app, 'anonymize_http', {
+      direction: 'response',
+      message: "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<script>alert('VEILCANARY-alpha')</script>",
+    });
+    const evidence = reflected.result.structuredContent.evidence;
+    assert.equal(evidence.some((item) => item.canary === 'VEILCANARY-alpha'), true);
+    assert.equal(evidence.some((item) => item.payloadIntegrity === 'full_payload'), true);
+    assert.equal(JSON.stringify(reflected).includes('private.example.com'), false);
+
+    const cleared = await mcpToolCall(app, 'clear_controlled_payloads');
+    assert.equal(cleared.result.structuredContent.cleared, true);
+    assert.equal(app.mcp.controlledPayloads.count(), 0);
+  } finally {
+    await app.stop();
+  }
+});
+
 test('MCP history and secrets tools never return raw target data', async () => {
   const origin = await createOriginServer();
   const app = createApp({
@@ -1182,6 +1270,12 @@ test('MCP reports local findings without returning raw evidence', async () => {
       body: `token=${secret.alias}`,
     });
     assert.equal(sent.result.structuredContent.sent, true);
+    const sentTrafficAfterSend = await apiRequest(app.api.port, '/api/sent-traffic');
+    assert.equal(sentTrafficAfterSend.length, 1);
+    assert.equal(sentTrafficAfterSend[0].sourceId, sourceId);
+    assert.equal(sentTrafficAfterSend[0].tool, 'send_modified_proxy_item');
+    const sentTrafficFull = await apiRequest(app.api.port, `/api/sent-traffic/${encodeURIComponent(sentTrafficAfterSend[0].id)}`);
+    assert.equal(Buffer.from(sentTrafficFull.request.bodyBase64, 'base64').toString('utf8').includes(secretValue), true);
 
     const sentReported = await mcpToolCall(app, 'report_sent_traffic_issue', {
       id: sourceId,
@@ -1208,6 +1302,7 @@ test('MCP reports local findings without returning raw evidence', async () => {
     assert.equal(modifiedReported.result.structuredContent.secretAliasesUsed.includes(secret.alias), true);
     assert.equal(JSON.stringify(modifiedReported).includes(secretValue), false);
     assert.equal(app.api.getUiState().echo.groups.some((group) => group.title === 'Reported evidence'), true);
+    assert.equal((await apiRequest(app.api.port, '/api/sent-traffic')).length, 2);
 
     const listed = await mcpToolCall(app, 'list_reported_findings', { limit: 10 });
     assert.equal(listed.result.structuredContent.count, 3);
@@ -1539,6 +1634,42 @@ test('exports, clears, and imports project snapshots', async () => {
       },
     });
     assert.equal(response.statusCode, 200);
+    app.proxy.addSentTraffic({
+      id: 'sent-snapshot',
+      sourceId: app.proxy.listHistory()[0].id,
+      tool: 'test',
+      type: 'http',
+      startedAt: Date.now(),
+      completedAt: Date.now(),
+      durationMs: 1,
+      request: {
+        method: 'GET',
+        url: target,
+        headers: { host: `127.0.0.1:${origin.port}` },
+        bodyText: '',
+        bodyBase64: '',
+      },
+      response: {
+        statusCode: 200,
+        statusMessage: 'OK',
+        headers: { 'content-type': 'text/plain' },
+        bodyText: 'sent evidence',
+        bodyBase64: Buffer.from('sent evidence').toString('base64'),
+      },
+      notes: ['snapshot sent traffic'],
+    });
+    app.mcp.replaceExchanges([
+      {
+        id: 'mcp-snapshot',
+        startedAt: Date.now(),
+        completedAt: Date.now(),
+        status: 200,
+        rpcMethod: 'tools/call',
+        tool: 'anonymize_http',
+        request: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'anonymize_http' } },
+        response: { jsonrpc: '2.0', id: 1, result: { structuredContent: { ok: true } } },
+      },
+    ]);
 
     await apiRequest(app.api.port, '/api/ui-state', 'PATCH', {
       echo: {
@@ -1561,17 +1692,25 @@ test('exports, clears, and imports project snapshots', async () => {
     assert.equal(exported.history.some((flow) => flow.request.url === target), true);
     assert.equal(exported.ui.echo.tabs[0].id, 'snapshot-tab');
     assert.equal(Array.isArray(exported.findings), true);
+    assert.equal(exported.sentTraffic.some((record) => record.id === 'sent-snapshot'), true);
+    assert.equal(exported.mcpExchanges.some((record) => record.id === 'mcp-snapshot'), true);
 
     const cleared = await apiRequest(app.api.port, '/api/project/new', 'POST');
     assert.equal(cleared.history.length, 0);
     assert.equal(cleared.ui.echo.tabs.length, 0);
     assert.equal(app.proxy.listHistory().length, 0);
     assert.equal((await apiRequest(app.api.port, '/api/findings')).length, 0);
+    assert.equal((await apiRequest(app.api.port, '/api/sent-traffic')).length, 0);
+    assert.equal((await apiRequest(app.api.port, '/api/mcp/exchanges')).length, 0);
 
     const imported = await apiRequest(app.api.port, '/api/project/import', 'POST', exported);
     assert.equal(imported.history.some((flow) => flow.url === target), true);
     assert.equal(imported.ui.echo.tabs[0].id, 'snapshot-tab');
+    assert.equal(imported.sentTraffic.some((record) => record.id === 'sent-snapshot'), true);
+    assert.equal(imported.mcpExchanges.some((record) => record.id === 'mcp-snapshot'), true);
     assert.equal(app.proxy.listHistory().some((flow) => flow.url === target), true);
+    assert.equal((await apiRequest(app.api.port, '/api/sent-traffic')).some((record) => record.id === 'sent-snapshot'), true);
+    assert.equal((await apiRequest(app.api.port, '/api/mcp/exchanges')).some((record) => record.id === 'mcp-snapshot'), true);
   } finally {
     await app.stop();
     await origin.close();

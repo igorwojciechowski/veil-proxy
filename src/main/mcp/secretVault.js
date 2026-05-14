@@ -96,12 +96,21 @@ class SecretVault {
       headers[name] = resolve(value);
     }
 
+    const bodyText = resolve(request.bodyText || '');
+    const bodyBuffer = Buffer.from(bodyText);
+    if (bodyBuffer.length > 0) {
+      headers['content-length'] = String(bodyBuffer.length);
+    } else {
+      delete headers['content-length'];
+    }
+
     return {
       request: {
         ...request,
         url: resolve(request.url || ''),
         headers,
-        bodyText: resolve(request.bodyText || ''),
+        bodyText,
+        bodyBase64: bodyBuffer.toString('base64'),
       },
       usedAliases: [...usedAliases],
       blockedAliases: [...blockedAliases],

@@ -34,6 +34,14 @@
             <span class="nav-icon">!</span>
             <span>Findings</span>
           </button>
+          <button class="nav-item" type="button" data-view="sentTraffic" title="Sent Traffic">
+            <span class="nav-icon">⇢</span>
+            <span>Sent</span>
+          </button>
+          <button class="nav-item" type="button" data-view="mcpLog" title="MCP Log">
+            <span class="nav-icon">◇</span>
+            <span>MCP Log</span>
+          </button>
           <button class="nav-item" type="button" data-view="scope" title="Scope">
             <span class="nav-icon">◎</span>
             <span>Scope</span>
@@ -301,6 +309,126 @@
                 <button id="refreshSiteMapBtn" class="button ghost compact-button" type="button">Refresh</button>
               </div>
               <div id="sitePathsList" class="site-path-list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="sentTrafficView" class="view">
+          <div class="sent-traffic-layout">
+            <section class="panel sent-traffic-panel">
+              <div class="panel-toolbar">
+                <div>
+                  <h2>Sent traffic</h2>
+                  <div id="sentTrafficSubtitle" class="panel-subtitle">0 requests sent by MCP</div>
+                </div>
+                <button id="clearSentTrafficBtn" class="button ghost compact-button" type="button">Clear</button>
+              </div>
+              <div class="table-wrap sent-traffic-table-wrap">
+                <table class="traffic-table">
+                  <thead>
+                    <tr>
+                      <th>ID</th>
+                      <th>Source</th>
+                      <th>Tool</th>
+                      <th>Method</th>
+                      <th>Host</th>
+                      <th>Status</th>
+                      <th>Size</th>
+                      <th>Time</th>
+                    </tr>
+                  </thead>
+                  <tbody id="sentTrafficRows"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="panel sent-traffic-detail-panel">
+              <div id="emptySentTrafficDetail" class="empty-state">Select sent traffic</div>
+              <div id="sentTrafficDetail" class="detail-content hidden">
+                <div class="detail-header">
+                  <div>
+                    <div id="sentTrafficMethod" class="method-pill">GET</div>
+                    <h2 id="sentTrafficUrl"></h2>
+                  </div>
+                  <div id="sentTrafficStatus" class="status-pill"></div>
+                </div>
+                <div class="sent-raw-grid">
+                  <section class="sent-raw-pane">
+                    <div class="raw-toolbar">
+                      <span>Raw request</span>
+                      <button class="button ghost copy-button" type="button" data-copy-target="sentTrafficRequestRaw">Copy</button>
+                    </div>
+                    <pre id="sentTrafficRequestRaw" class="raw-code http-code line-numbered" tabindex="0"></pre>
+                  </section>
+                  <section class="sent-raw-pane">
+                    <div class="raw-toolbar">
+                      <span>Raw response</span>
+                      <button class="button ghost copy-button" type="button" data-copy-target="sentTrafficResponseRaw">Copy</button>
+                    </div>
+                    <pre id="sentTrafficResponseRaw" class="raw-code http-code line-numbered" tabindex="0"></pre>
+                  </section>
+                </div>
+                <pre id="sentTrafficMeta" class="code-block"></pre>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section id="mcpLogView" class="view">
+          <div class="mcp-log-layout">
+            <section class="panel mcp-log-panel">
+              <div class="panel-toolbar">
+                <div>
+                  <h2>MCP log</h2>
+                  <div id="mcpLogSubtitle" class="panel-subtitle">0 exchanges</div>
+                </div>
+                <button id="clearMcpLogBtn" class="button ghost compact-button" type="button">Clear</button>
+              </div>
+              <div class="table-wrap mcp-log-table-wrap">
+                <table class="traffic-table mcp-log-table">
+                  <thead>
+                    <tr>
+                      <th>ID</th>
+                      <th>RPC</th>
+                      <th>Tool</th>
+                      <th>Status</th>
+                      <th>Size</th>
+                      <th>Time</th>
+                    </tr>
+                  </thead>
+                  <tbody id="mcpLogRows"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="panel mcp-log-detail-panel">
+              <div id="emptyMcpLogDetail" class="empty-state">Select MCP exchange</div>
+              <div id="mcpLogDetail" class="detail-content hidden">
+                <div class="detail-header">
+                  <div>
+                    <div id="mcpLogMethod" class="method-pill">tools/call</div>
+                    <h2 id="mcpLogTool"></h2>
+                  </div>
+                  <div id="mcpLogStatus" class="status-pill"></div>
+                </div>
+                <div class="sent-raw-grid">
+                  <section class="sent-raw-pane">
+                    <div class="raw-toolbar">
+                      <span>JSON-RPC request</span>
+                      <button class="button ghost copy-button" type="button" data-copy-target="mcpLogRequestRaw">Copy</button>
+                    </div>
+                    <pre id="mcpLogRequestRaw" class="raw-code line-numbered language-json" tabindex="0"></pre>
+                  </section>
+                  <section class="sent-raw-pane">
+                    <div class="raw-toolbar">
+                      <span>JSON-RPC response</span>
+                      <button class="button ghost copy-button" type="button" data-copy-target="mcpLogResponseRaw">Copy</button>
+                    </div>
+                    <pre id="mcpLogResponseRaw" class="raw-code line-numbered language-json" tabindex="0"></pre>
+                  </section>
+                </div>
+                <pre id="mcpLogMeta" class="code-block"></pre>
+              </div>
             </section>
           </div>
         </section>

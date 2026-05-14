@@ -64,9 +64,14 @@ When `Active testing` is enabled in MCP settings, Veil Proxy also exposes active
 
 - `send_modified_proxy_item` for one-off modified requests.
 - `run_payload_attack` for Intruder-like sequential payload attacks against query, body, cookie, header, path, or raw body insertion points. Payload attack results include anonymized summaries, reflection/security-signal flags, and limited anonymized details.
+- `register_controlled_payload` and `clear_controlled_payloads` for operator-controlled canary/payload evidence. Reflections are returned as sanitized evidence snippets, including URL/HTML-decoded variants.
 - `send_proxy_item_to_echo` and `send_random_proxy_item_to_echo` for copying captured requests into local Echo tabs or groups without returning raw traffic through MCP.
 - `report_proxy_item_issue`, `report_sent_traffic_issue`, and `report_modified_proxy_item_issue` for creating local Veil Proxy findings from captured or MCP-sent evidence.
 - `list_reported_findings` for reviewing anonymized summaries of MCP-reported findings.
+
+MCP-sent requests are stored locally in the `Sent` view and in project snapshots. The local UI can inspect raw sent request/response evidence; MCP clients only receive anonymized output through tools such as `get_sent_traffic_item`.
+
+The `MCP Log` view records local JSON-RPC exchanges with request/response payloads for operator debugging. Authorization headers are not stored in the log, and the log is never exposed through MCP tools.
 
 ## Environment
 

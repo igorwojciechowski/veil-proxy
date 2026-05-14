@@ -1,23 +1,28 @@
 const crypto = require('crypto');
+const EventEmitter = require('events');
 const http = require('http');
 const { AliasVault, HttpAnonymizer } = require('./anonymizer');
+const { ControlledPayloadRegistry } = require('./controlledPayloads');
 const { McpTools } = require('./mcpTools');
 const { SecretVault } = require('./secretVault');
 
 const DEFAULT_PROTOCOL_VERSION = '2025-06-18';
 
-class McpServer {
+class McpServer extends EventEmitter {
   constructor({ proxy, configProvider }) {
+    super();
     this.proxy = proxy;
     this.configProvider = configProvider || (() => proxy.getConfig());
     this.aliasVault = new AliasVault();
     this.secretVault = new SecretVault();
-    this.anonymizer = new HttpAnonymizer(this.aliasVault);
+    this.controlledPayloads = new ControlledPayloadRegistry();
+    this.anonymizer = new HttpAnonymizer(this.aliasVault, this.controlledPayloads);
     this.tools = new McpTools({
       proxy,
       anonymizer: this.anonymizer,
       aliasVault: this.aliasVault,
       secretVault: this.secretVault,
+      controlledPayloads: this.controlledPayloads,
       configProvider: this.configProvider,
     });
     this.server = null;
@@ -26,6 +31,7 @@ class McpServer {
     this.token = '';
     this.lastError = '';
     this.sessionId = crypto.randomUUID();
+    this.exchanges = [];
   }
 
   async start() {
@@ -42,7 +48,7 @@ class McpServer {
 
     const server = http.createServer(this.handleRequest.bind(this));
     try {
-      await listen(server, Number(config.port || 8765), this.host);
+      await listen(server, config.port == null ? 8765 : Number(config.port), this.host);
       this.server = server;
       this.port = server.address().port;
       this.lastError = '';
@@ -91,13 +97,15 @@ class McpServer {
       endpoint: this.endpoint(),
       health: this.server ? `http://${this.host}:${this.port}/health` : '',
       host: this.host,
-      port: this.port || Number(config.port || 8765),
+      port: this.port || (config.port == null ? 8765 : Number(config.port)),
       token: this.token,
       requireScope: config.requireScope === true,
       activeTesting: config.activeTesting === true,
       lastError: this.lastError,
       aliasMappings: this.aliasVault.mappingCount(),
       secretCount: this.secretVault.count(),
+      controlledPayloadCount: this.controlledPayloads.count(),
+      exchangeCount: this.exchanges.length,
     };
   }
 
@@ -136,21 +144,36 @@ class McpServer {
       return;
     }
 
+    const startedAt = Date.now();
+    let body = null;
     try {
-      const body = await readJson(req, 20 * 1024 * 1024);
+      body = await readJson(req, 20 * 1024 * 1024);
       if (Array.isArray(body)) {
-        sendJson(res, 400, jsonRpcError(null, -32600, 'Batch requests are not supported'));
+        const response = jsonRpcError(null, -32600, 'Batch requests are not supported');
+        this.recordExchange({ request: body, response, status: 400, startedAt, completedAt: Date.now() });
+        sendJson(res, 400, response);
         return;
       }
       const response = await this.handleJsonRpc(body || {});
       if (!response) {
+        this.recordExchange({ request: body, response: null, status: 202, startedAt, completedAt: Date.now() });
         res.writeHead(202, { 'cache-control': 'no-store' });
         res.end();
         return;
       }
+      this.recordExchange({ request: body, response, status: 200, startedAt, completedAt: Date.now() });
       sendJson(res, 200, response, { 'Mcp-Session-Id': this.sessionId });
     } catch (error) {
-      sendJson(res, 200, jsonRpcError(null, -32603, error.message || 'Internal error'));
+      const response = jsonRpcError(jsonRpcId(body), -32603, error.message || 'Internal error');
+      this.recordExchange({
+        request: body,
+        response,
+        status: 200,
+        startedAt,
+        completedAt: Date.now(),
+        error: error.message || 'Internal error',
+      });
+      sendJson(res, 200, response);
     }
   }
 
@@ -209,6 +232,37 @@ class McpServer {
     }
     return await this.tools.call(name, params.arguments || {});
   }
+
+  listExchanges() {
+    return this.exchanges.map(mcpExchangeSummary);
+  }
+
+  getExchange(id) {
+    return this.exchanges.find((exchange) => exchange.id === String(id || '')) || null;
+  }
+
+  replaceExchanges(exchanges = []) {
+    this.exchanges = sanitizeMcpExchanges(exchanges);
+    this.emit('mcp-exchanges', this.listExchanges());
+    return this.listExchanges();
+  }
+
+  clearExchanges() {
+    this.exchanges = [];
+    this.emit('mcp-exchanges', []);
+    return [];
+  }
+
+  recordExchange(entry = {}) {
+    const exchange = sanitizeMcpExchange({
+      ...entry,
+      id: `mcp-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
+    });
+    this.exchanges.unshift(exchange);
+    this.exchanges.length = Math.min(this.exchanges.length, 500);
+    this.emit('mcp-exchanges', this.listExchanges());
+    return exchange;
+  }
 }
 
 function jsonRpcResult(id, result) {
@@ -228,6 +282,97 @@ function jsonRpcError(id, code, message) {
       message,
     },
   };
+}
+
+function jsonRpcId(request) {
+  return request && typeof request === 'object' && Object.prototype.hasOwnProperty.call(request, 'id') ? request.id : null;
+}
+
+function sanitizeMcpExchanges(exchanges) {
+  return (Array.isArray(exchanges) ? exchanges : [])
+    .map(sanitizeMcpExchange)
+    .filter(Boolean)
+    .slice(0, 500);
+}
+
+function sanitizeMcpExchange(exchange) {
+  if (!exchange || typeof exchange !== 'object') {
+    return null;
+  }
+  const request = cloneJson(exchange.request);
+  const response = cloneJson(exchange.response);
+  const startedAt = Number(exchange.startedAt || Date.now());
+  const completedAt = Number(exchange.completedAt || startedAt);
+  const rpc = summarizeRpc(request);
+  return {
+    id: String(exchange.id || `mcp-${startedAt}`),
+    startedAt,
+    completedAt,
+    durationMs: Math.max(0, completedAt - startedAt),
+    status: Number(exchange.status || 0),
+    rpcMethod: String(exchange.rpcMethod || rpc.method || ''),
+    tool: String(exchange.tool || rpc.tool || ''),
+    jsonRpcId: jsonRpcId(request),
+    error: String(exchange.error || response?.error?.message || ''),
+    request,
+    response,
+  };
+}
+
+function mcpExchangeSummary(exchange) {
+  return {
+    id: exchange.id,
+    startedAt: exchange.startedAt,
+    completedAt: exchange.completedAt,
+    durationMs: exchange.durationMs,
+    status: exchange.status,
+    rpcMethod: exchange.rpcMethod,
+    tool: exchange.tool,
+    jsonRpcId: exchange.jsonRpcId,
+    error: exchange.error,
+    requestBytes: jsonByteLength(exchange.request),
+    responseBytes: jsonByteLength(exchange.response),
+  };
+}
+
+function summarizeRpc(request) {
+  if (!request || typeof request !== 'object' || Array.isArray(request)) {
+    return { method: '', tool: '' };
+  }
+  return {
+    method: String(request.method || ''),
+    tool: request.method === 'tools/call' ? String(request.params?.name || '') : '',
+  };
+}
+
+function cloneJson(value) {
+  if (value == null) {
+    return value;
+  }
+  try {
+    const text = JSON.stringify(value);
+    if (text.length > 1024 * 1024) {
+      return {
+        clipped: true,
+        originalBytes: Buffer.byteLength(text, 'utf8'),
+        preview: text.slice(0, 1024 * 1024),
+      };
+    }
+    return JSON.parse(text);
+  } catch {
+    return String(value);
+  }
+}
+
+function jsonByteLength(value) {
+  if (value == null) {
+    return 0;
+  }
+  try {
+    return Buffer.byteLength(JSON.stringify(value), 'utf8');
+  } catch {
+    return Buffer.byteLength(String(value), 'utf8');
+  }
 }
 
 function sendJson(res, status, payload, extraHeaders = {}) {

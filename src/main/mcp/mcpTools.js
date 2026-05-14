@@ -6,11 +6,12 @@ const SECURITY_SIGNAL =
   /\b(?:SQLITE_ERROR|SQL\s+syntax|syntax\s+error|ORA-\d{4,5}|ODBC|JDBC|PostgreSQL|MySQL|MariaDB|SQLite|SQL\s+Server|MongoError|SequelizeDatabaseError|PDOException|XPathException|SAXParseException|TemplateSyntaxError|Traceback|stack\s+trace|Exception|Command\s+failed|Permission\s+denied)\b|<script\b|javascript:|onerror\s*=|onload\s*=|alert\s*\(/i;
 
 class McpTools {
-  constructor({ proxy, anonymizer, aliasVault, secretVault, configProvider }) {
+  constructor({ proxy, anonymizer, aliasVault, secretVault, controlledPayloads, configProvider }) {
     this.proxy = proxy;
     this.anonymizer = anonymizer;
     this.aliasVault = aliasVault;
     this.secretVault = secretVault;
+    this.controlledPayloads = controlledPayloads;
     this.configProvider = configProvider;
     this.sentTraffic = [];
     this.uiStateAccess = null;
@@ -126,6 +127,13 @@ class McpTools {
           ),
           ['id', 'insertionPoint', 'payloads'],
         ),
+        tool(
+          'register_controlled_payload',
+          'Register an operator-controlled payload or canary. Reflections are returned only as sanitized evidence snippets.',
+          objectSchema(property('payload', 'string', 'Payload/canary controlled by the operator. Raw payload is not returned by MCP.')),
+          ['payload'],
+        ),
+        tool('clear_controlled_payloads', 'Clear registered controlled payloads/canaries.', objectSchema()),
         tool(
           'send_proxy_item_to_echo',
           'Copy a history request into a local Echo tab or group. MCP returns anonymized metadata only; the raw request stays inside Veil Proxy.',
@@ -254,6 +262,10 @@ class McpTools {
         return this.getSentTrafficItem(args);
       case 'run_payload_attack':
         return this.runPayloadAttack(args);
+      case 'register_controlled_payload':
+        return this.registerControlledPayload(args);
+      case 'clear_controlled_payloads':
+        return this.clearControlledPayloads();
       case 'send_proxy_item_to_echo':
       case 'send_proxy_item_to_repeater':
         return this.sendProxyItemToEcho(args);
@@ -311,6 +323,7 @@ class McpTools {
         'Use get_proxy_item only when you need an anonymized request/response for a specific request id.',
         'Use list_secrets when credentials, tokens, tenant ids, or other operator-provided values may be needed. Place only returned aliases in request mutations.',
         'If active testing is enabled, use send_proxy_item_to_echo to stage original requests locally, send_modified_proxy_item for one-off checks, and run_payload_attack for Intruder-like payload loops. Veil Proxy resolves secret aliases locally and returns only anonymized evidence.',
+        'Register controlled canaries with register_controlled_payload when testing reflections; run_payload_attack registers payloads automatically.',
         'When a vulnerability is confirmed, report it locally with report_proxy_item_issue, report_sent_traffic_issue, or report_modified_proxy_item_issue, then use list_reported_findings to review anonymized summaries.',
       ],
       privacyRules: [
@@ -494,8 +507,9 @@ class McpTools {
 
     const sent = await this.proxy.sendEchoRequest(resolved.request);
     const record = {
-      id: String(id),
+      id: makeSentTrafficId(String(id), 'modified'),
       sourceId: String(id),
+      tool: 'send_modified_proxy_item',
       type: 'http',
       startedAt: sent.startedAt,
       completedAt: sent.completedAt,
@@ -505,11 +519,11 @@ class McpTools {
       error: sent.error,
       notes: ['Sent by MCP'],
     };
-    this.sentTraffic.unshift(record);
-    this.sentTraffic.length = Math.min(this.sentTraffic.length, 100);
-    const result = this.proxyItemResult(record, true).structuredContent;
+    const saved = this.recordSentTraffic(record);
+    const result = this.proxyItemResult(saved, true).structuredContent;
     result.sent = true;
     result.sourceId = String(id);
+    result.sentTrafficId = saved.id;
     result.secretAliasesUsed = resolved.usedAliases;
     return toolResult(result);
   }
@@ -526,6 +540,9 @@ class McpTools {
     const payloads = stringList(args.payloads).filter(Boolean).slice(0, MAX_ATTACK_PAYLOADS);
     if (payloads.length === 0) {
       return toolError('payloads must contain at least one non-empty payload');
+    }
+    if (this.controlledPayloads && typeof this.controlledPayloads.registerMany === 'function') {
+      this.controlledPayloads.registerMany(payloads);
     }
     const insertionPoint = args.insertionPoint && typeof args.insertionPoint === 'object' ? args.insertionPoint : null;
     if (!insertionPoint) {
@@ -576,18 +593,17 @@ class McpTools {
 
       const sent = await this.proxy.sendEchoRequest(resolved.request);
       const record = sentTrafficRecord(String(id), index, sent, 'Payload attack');
-      this.sentTraffic.unshift(record);
-      this.sentTraffic.length = Math.min(this.sentTraffic.length, 100);
+      const saved = this.recordSentTraffic(record);
 
       const resolvedPayload = this.secretVault.resolveText(payload).text;
-      const summary = this.attackSummary(record, payload, resolvedPayload, index, baseline);
+      const summary = this.attackSummary(saved, payload, resolvedPayload, index, baseline);
       baseline = baseline || summary;
       summaries.push(summary);
       if (summary.statusCode) {
         statusCodes[summary.statusCode] = (statusCodes[summary.statusCode] || 0) + 1;
       }
       if (includeDetails && details.length < detailLimit && isInterestingAttackResult(summary, baseline, index)) {
-        const detail = this.proxyItemResult(record, true).structuredContent;
+        const detail = this.proxyItemResult(saved, true).structuredContent;
         detail.attackIndex = index;
         detail.payloadPreview = summary.payloadPreview;
         detail.payloadReflected = summary.payloadReflected;
@@ -630,6 +646,32 @@ class McpTools {
       return toolError(`Scope guard blocked request ${id}`);
     }
     return this.createEchoTabForFlow(flow, args);
+  }
+
+  registerControlledPayload(args) {
+    const payload = requiredText(args, 'payload');
+    if (!this.controlledPayloads || typeof this.controlledPayloads.register !== 'function') {
+      return toolError('Controlled payload registry is unavailable.');
+    }
+    const summary = this.controlledPayloads.register(payload);
+    return toolResult({
+      registered: Boolean(summary),
+      controlledPayloads: this.controlledPayloads.count(),
+      payload: summary,
+      canaries: this.controlledPayloads.canaries(),
+      rawPayloadReturned: false,
+    });
+  }
+
+  clearControlledPayloads() {
+    if (!this.controlledPayloads || typeof this.controlledPayloads.clear !== 'function') {
+      return toolError('Controlled payload registry is unavailable.');
+    }
+    this.controlledPayloads.clear();
+    return toolResult({
+      cleared: true,
+      controlledPayloads: 0,
+    });
   }
 
   sendRandomProxyItemToEcho(args) {
@@ -720,7 +762,7 @@ class McpTools {
     const blocked = this.ensureScope();
     if (blocked) return blocked;
     const id = requiredText(args, 'id');
-    const record = this.sentTraffic.find((item) => item.sourceId === String(id));
+    const record = this.latestSentTraffic(String(id));
     if (!record) {
       return toolError(`Sent traffic evidence not found for source id: ${id}. Use send_modified_proxy_item first, or use report_modified_proxy_item_issue to send and report in one call.`);
     }
@@ -776,6 +818,7 @@ class McpTools {
     const record = {
       id: `${id}:issue:${Date.now()}`,
       sourceId: String(id),
+      tool: 'report_modified_proxy_item_issue',
       type: 'http',
       startedAt: sent.startedAt,
       completedAt: sent.completedAt,
@@ -785,11 +828,10 @@ class McpTools {
       error: sent.error,
       notes: ['Sent by MCP issue reporter'],
     };
-    this.sentTraffic.unshift(record);
-    this.sentTraffic.length = Math.min(this.sentTraffic.length, 100);
+    const saved = this.recordSentTraffic(record);
 
     if (optionalBoolean(args, 'createEchoTab', false)) {
-      this.createEchoTabForFlow(record, {
+      this.createEchoTabForFlow(saved, {
         tabName: optionalText(args, 'tabName', '') || `Evidence #${id}`,
         groupName: optionalText(args, 'groupName', '') || optionalText(args, 'repeaterGroup', ''),
         color: optionalText(args, 'color', ''),
@@ -798,14 +840,14 @@ class McpTools {
     }
 
     const issue = issueFromArgs(args);
-    const finding = this.addFindingForRecord(record, issue, 'modified_request');
-    const result = this.issueResult(finding, record, issue, 'modified_request', {
+    const finding = this.addFindingForRecord(saved, issue, 'modified_request');
+    const result = this.issueResult(finding, saved, issue, 'modified_request', {
       sourceId: String(id),
-      sentTrafficId: String(record.id),
+      sentTrafficId: String(saved.id),
       secretAliasesUsed: resolved.usedAliases,
       note: 'Finding evidence uses this modified request/response, not the original captured request.',
     }).structuredContent;
-    const evidence = this.proxyItemResult(record, true).structuredContent;
+    const evidence = this.proxyItemResult(saved, true).structuredContent;
     result.request = evidence.request;
     result.response = evidence.response || null;
     result.requestReplacements = evidence.requestReplacements;
@@ -928,11 +970,27 @@ class McpTools {
   getSentTrafficItem(args) {
     const id = requiredText(args, 'id');
     const includeResponse = optionalBoolean(args, 'includeResponse', true);
-    const record = this.sentTraffic.find((item) => item.sourceId === String(id));
+    const record = this.latestSentTraffic(String(id)) || (this.proxy.getSentTrafficRecord ? this.proxy.getSentTrafficRecord(String(id)) : null);
     if (!record) {
       return toolError(`Sent traffic item not found for source id: ${id}`);
     }
     return this.proxyItemResult(record, includeResponse);
+  }
+
+  recordSentTraffic(record) {
+    if (this.proxy.addSentTraffic) {
+      return this.proxy.addSentTraffic(record) || record;
+    }
+    this.sentTraffic.unshift(record);
+    this.sentTraffic.length = Math.min(this.sentTraffic.length, 100);
+    return record;
+  }
+
+  latestSentTraffic(sourceId) {
+    if (this.proxy.findSentTrafficBySourceId) {
+      return this.proxy.findSentTrafficBySourceId(String(sourceId));
+    }
+    return this.sentTraffic.find((item) => item.sourceId === String(sourceId)) || null;
   }
 
   history(limit, inScopeOnly) {
@@ -1024,6 +1082,8 @@ function activeOnlyTool(name) {
     'send_modified_proxy_item',
     'get_sent_traffic_item',
     'run_payload_attack',
+    'register_controlled_payload',
+    'clear_controlled_payloads',
     'send_proxy_item_to_echo',
     'send_random_proxy_item_to_echo',
     'send_proxy_item_to_repeater',
@@ -1362,8 +1422,9 @@ function finalizeRequest(request) {
 
 function sentTrafficRecord(sourceId, index, sent, note) {
   return {
-    id: `${sourceId}:${index}`,
+    id: makeSentTrafficId(sourceId, `attack-${index}`),
     sourceId: String(sourceId),
+    tool: 'run_payload_attack',
     type: 'http',
     startedAt: sent.startedAt,
     completedAt: sent.completedAt,
@@ -1463,6 +1524,10 @@ function sanitizeEchoColor(value) {
 
 function makeEchoId(prefix) {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function makeSentTrafficId(sourceId, label) {
+  return `sent-${String(sourceId || '0')}-${String(label || 'mcp').replace(/[^a-z0-9_-]/gi, '-')}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function issueFromArgs(args) {

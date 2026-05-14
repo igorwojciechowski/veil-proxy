@@ -449,6 +449,10 @@ h2 {
 
 .traffic-panel,
 .detail-panel,
+.sent-traffic-panel,
+.sent-traffic-detail-panel,
+.mcp-log-panel,
+.mcp-log-detail-panel,
 .queue-panel,
 .editor-panel,
 .settings-panel,
@@ -458,6 +462,77 @@ h2 {
   display: flex;
   min-height: 0;
   flex-direction: column;
+}
+
+.sent-traffic-layout {
+  display: grid;
+  grid-template-columns: minmax(520px, 0.92fr) minmax(460px, 1fr);
+  gap: 16px;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.mcp-log-layout {
+  display: grid;
+  grid-template-columns: minmax(460px, 0.78fr) minmax(520px, 1fr);
+  gap: 16px;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.sent-traffic-table-wrap,
+.mcp-log-table-wrap {
+  flex: 1 1 auto;
+}
+
+.mcp-log-table th:nth-child(1),
+.mcp-log-table td:nth-child(1) {
+  width: 96px;
+}
+
+.mcp-log-table th:nth-child(2),
+.mcp-log-table td:nth-child(2) {
+  width: 128px;
+}
+
+.mcp-log-table th:nth-child(4),
+.mcp-log-table td:nth-child(4) {
+  width: 86px;
+}
+
+.mcp-log-table th:nth-child(5),
+.mcp-log-table td:nth-child(5),
+.mcp-log-table th:nth-child(6),
+.mcp-log-table td:nth-child(6) {
+  width: 96px;
+}
+
+.sent-raw-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+  min-height: 280px;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.sent-raw-pane {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.sent-raw-pane .raw-code {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.compact-empty {
+  min-height: 120px;
+  padding: 24px;
 }
 
 .panel-toolbar,

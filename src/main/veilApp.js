@@ -16,6 +16,9 @@ function createApp(options = {}) {
     proxy,
     configProvider: () => proxy.getConfig(),
   });
+  if (store && typeof store.getMcpExchanges === 'function' && typeof mcp.replaceExchanges === 'function') {
+    mcp.replaceExchanges(store.getMcpExchanges());
+  }
   const publicDir = options.publicDir || path.resolve(__dirname, '../../public');
   const api = new ApiServer({
     config,

@@ -139,6 +139,24 @@ class ProjectStore {
     this.setJsonMeta('reportedFindings', Array.isArray(findings) ? findings : []);
   }
 
+  getSentTraffic() {
+    const value = this.getJsonMeta('sentTraffic', []);
+    return Array.isArray(value) ? value : [];
+  }
+
+  setSentTraffic(records) {
+    this.setJsonMeta('sentTraffic', Array.isArray(records) ? records : []);
+  }
+
+  getMcpExchanges() {
+    const value = this.getJsonMeta('mcpExchanges', []);
+    return Array.isArray(value) ? value : [];
+  }
+
+  setMcpExchanges(records) {
+    this.setJsonMeta('mcpExchanges', Array.isArray(records) ? records : []);
+  }
+
   loadHistory(limit) {
     const safeLimit = normalizeLimit(limit);
     return this.statements.listFlows
@@ -156,6 +174,8 @@ class ProjectStore {
       ui: this.getAllUiState(),
       history: this.loadHistory(100000),
       reportedFindings: this.getFindings(),
+      sentTraffic: this.getSentTraffic(),
+      mcpExchanges: this.getMcpExchanges(),
     };
   }
 
@@ -170,6 +190,8 @@ class ProjectStore {
         this.setUiState(name, value);
       }
       this.setFindings(normalized.reportedFindings || []);
+      this.setSentTraffic(normalized.sentTraffic || []);
+      this.setMcpExchanges(normalized.mcpExchanges || []);
       for (const flow of normalized.history || []) {
         this.upsertFlow(flow);
       }
@@ -406,6 +428,8 @@ function normalizeProjectData(data) {
     ui: raw.ui && typeof raw.ui === 'object' ? raw.ui : {},
     history: Array.isArray(raw.history) ? raw.history.filter((flow) => flow && typeof flow === 'object' && flow.id && flow.request) : [],
     reportedFindings: normalizeReportedFindings(raw.reportedFindings || raw.findings),
+    sentTraffic: normalizeSentTraffic(raw.sentTraffic),
+    mcpExchanges: normalizeMcpExchanges(raw.mcpExchanges),
   };
 }
 
@@ -421,6 +445,34 @@ function normalizeReportedFindings(value) {
       evidence: Array.isArray(finding.evidence) ? finding.evidence.map(String) : [],
     }))
     .filter((finding) => finding.id);
+}
+
+function normalizeSentTraffic(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((record) => record && typeof record === 'object' && record.id && record.request)
+    .map((record) => ({
+      ...record,
+      id: String(record.id),
+      sourceId: String(record.sourceId || ''),
+      type: 'http',
+      notes: Array.isArray(record.notes) ? record.notes.map(String) : [],
+    }))
+    .slice(0, 500);
+}
+
+function normalizeMcpExchanges(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((record) => record && typeof record === 'object' && record.id)
+    .map((record) => ({
+      ...record,
+      id: String(record.id),
+      rpcMethod: String(record.rpcMethod || ''),
+      tool: String(record.tool || ''),
+      error: String(record.error || ''),
+    }))
+    .slice(0, 500);
 }
 
 module.exports = {

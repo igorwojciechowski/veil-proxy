@@ -1,4 +1,5 @@
 const net = require('net');
+const { ControlledPayloadRegistry } = require('./controlledPayloads');
 
 const DEFAULT_OPTIONS = {
   aggressivePathRedaction: false,
@@ -53,16 +54,19 @@ class AliasVault {
 }
 
 class HttpAnonymizer {
-  constructor(aliasVault = new AliasVault()) {
+  constructor(aliasVault = new AliasVault(), controlledPayloads = new ControlledPayloadRegistry()) {
     this.aliasVault = aliasVault;
+    this.controlledPayloads = controlledPayloads;
   }
 
   anonymizeHttpMessage(raw, direction = 'auto', options = {}) {
     const merged = { ...DEFAULT_OPTIONS, ...options };
     const source = String(raw || '');
+    const evidence = this.controlledEvidence(source, merged);
     const parsed = parseHttpMessage(source);
     if (!parsed) {
-      return this.anonymizeText(source, merged);
+      const result = this.anonymizeText(source, merged);
+      return { ...result, evidence };
     }
 
     const inferredDirection = direction === 'auto' || !direction ? parsed.direction : direction;
@@ -92,7 +96,7 @@ class HttpAnonymizer {
       text,
       replacements,
       decisions,
-      evidence: [],
+      evidence,
     };
   }
 
@@ -106,7 +110,7 @@ class HttpAnonymizer {
       text: result,
       replacements,
       decisions,
-      evidence: [],
+      evidence: this.controlledEvidence(source, merged),
     };
   }
 
@@ -265,6 +269,15 @@ class HttpAnonymizer {
 
     return text;
   }
+
+  controlledEvidence(source, options) {
+    if (!this.controlledPayloads || typeof this.controlledPayloads.collectEvidence !== 'function') {
+      return [];
+    }
+    return this.controlledPayloads.collectEvidence(source, {
+      sanitizeSnippet: (snippet) => this.redactText(snippet, options, [], []),
+    });
+  }
 }
 
 function parseHttpMessage(raw) {
@@ -413,4 +426,5 @@ function redactStructuredValue(value, redactString) {
 module.exports = {
   AliasVault,
   HttpAnonymizer,
+  ControlledPayloadRegistry,
 };

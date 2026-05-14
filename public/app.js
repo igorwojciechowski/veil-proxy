@@ -8,6 +8,8 @@ const state = {
   mcp: null,
   history: [],
   findings: [],
+  sentTraffic: [],
+  mcpExchanges: [],
   pending: [],
   desktopProject: null,
   projectDirty: false,
@@ -71,6 +73,10 @@ const state = {
   globalSearchError: '',
   findingsSearch: '',
   findingsSeverity: '',
+  selectedSentTrafficId: null,
+  selectedSentTraffic: null,
+  selectedMcpExchangeId: null,
+  selectedMcpExchange: null,
   echoTabs: [],
   echoGroups: [],
   selectedEchoGroupId: null,
@@ -134,6 +140,28 @@ const el = {
   findingsSeverityFilter: document.querySelector('#findingsSeverityFilter'),
   findingsList: document.querySelector('#findingsList'),
   refreshFindingsBtn: document.querySelector('#refreshFindingsBtn'),
+  sentTrafficSubtitle: document.querySelector('#sentTrafficSubtitle'),
+  sentTrafficRows: document.querySelector('#sentTrafficRows'),
+  clearSentTrafficBtn: document.querySelector('#clearSentTrafficBtn'),
+  emptySentTrafficDetail: document.querySelector('#emptySentTrafficDetail'),
+  sentTrafficDetail: document.querySelector('#sentTrafficDetail'),
+  sentTrafficMethod: document.querySelector('#sentTrafficMethod'),
+  sentTrafficUrl: document.querySelector('#sentTrafficUrl'),
+  sentTrafficStatus: document.querySelector('#sentTrafficStatus'),
+  sentTrafficRequestRaw: document.querySelector('#sentTrafficRequestRaw'),
+  sentTrafficResponseRaw: document.querySelector('#sentTrafficResponseRaw'),
+  sentTrafficMeta: document.querySelector('#sentTrafficMeta'),
+  mcpLogSubtitle: document.querySelector('#mcpLogSubtitle'),
+  mcpLogRows: document.querySelector('#mcpLogRows'),
+  clearMcpLogBtn: document.querySelector('#clearMcpLogBtn'),
+  emptyMcpLogDetail: document.querySelector('#emptyMcpLogDetail'),
+  mcpLogDetail: document.querySelector('#mcpLogDetail'),
+  mcpLogMethod: document.querySelector('#mcpLogMethod'),
+  mcpLogTool: document.querySelector('#mcpLogTool'),
+  mcpLogStatus: document.querySelector('#mcpLogStatus'),
+  mcpLogRequestRaw: document.querySelector('#mcpLogRequestRaw'),
+  mcpLogResponseRaw: document.querySelector('#mcpLogResponseRaw'),
+  mcpLogMeta: document.querySelector('#mcpLogMeta'),
   echoTabs: document.querySelector('#echoTabs'),
   echoGroupList: document.querySelector('#echoGroupList'),
   newEchoTabBtn: document.querySelector('#newEchoTabBtn'),
@@ -443,6 +471,18 @@ function bindUi() {
     state.findingsSeverity = el.findingsSeverityFilter.value;
     renderFindings();
   });
+  el.sentTrafficRows?.addEventListener('click', async (event) => {
+    const row = event.target.closest('[data-sent-traffic-id]');
+    if (!row) return;
+    await loadSentTraffic(row.dataset.sentTrafficId);
+  });
+  el.clearSentTrafficBtn?.addEventListener('click', clearSentTraffic);
+  el.mcpLogRows?.addEventListener('click', async (event) => {
+    const row = event.target.closest('[data-mcp-exchange-id]');
+    if (!row) return;
+    await loadMcpExchange(row.dataset.mcpExchangeId);
+  });
+  el.clearMcpLogBtn?.addEventListener('click', clearMcpLog);
   el.newEchoTabBtn.addEventListener('click', () => createBlankEchoTab());
   el.newEchoGroupBtn.addEventListener('click', createEchoGroup);
   el.sendEchoBtn.addEventListener('click', sendSelectedEchoRequest);
@@ -623,6 +663,24 @@ function openEvents() {
     renderMeta();
     renderFindings();
   });
+  events.addEventListener('sent-traffic', (event) => {
+    state.sentTraffic = JSON.parse(event.data);
+    if (!state.sentTraffic.some((item) => item.id === state.selectedSentTrafficId)) {
+      state.selectedSentTrafficId = null;
+      state.selectedSentTraffic = null;
+    }
+    renderSentTraffic();
+    markProjectDirty();
+  });
+  events.addEventListener('mcp-exchanges', (event) => {
+    state.mcpExchanges = JSON.parse(event.data);
+    if (!state.mcpExchanges.some((item) => item.id === state.selectedMcpExchangeId)) {
+      state.selectedMcpExchangeId = null;
+      state.selectedMcpExchange = null;
+    }
+    renderMcpLog();
+    markProjectDirty();
+  });
   events.addEventListener('pending', (event) => {
     state.pending = JSON.parse(event.data);
     renderAll({ config: false });
@@ -642,6 +700,8 @@ function applyState(payload, forceUi = false, options = {}) {
   state.mcp = payload.mcp || null;
   state.project = payload.project || null;
   state.history = payload.history || [];
+  state.sentTraffic = payload.sentTraffic || [];
+  state.mcpExchanges = payload.mcpExchanges || [];
   state.pending = payload.pending || [];
   applyUiState(payload.ui, forceUi);
   state.selectedFlowId = state.history.some((flow) => flow.id === state.selectedFlowId) ? state.selectedFlowId : null;
@@ -700,6 +760,8 @@ function renderAll(options = {}) {
   renderSiteMap();
   renderGlobalSearch();
   renderFindings();
+  renderSentTraffic();
+  renderMcpLog();
   renderEcho();
   renderPending();
   renderDetail();
@@ -1987,10 +2049,11 @@ function scheduleFindingsLoad() {
 }
 
 async function refreshHistoryAndSiteMap() {
-  const [history, siteMap, findings] = await Promise.all([api('/api/history'), api('/api/site-map'), api('/api/findings')]);
+  const [history, siteMap, findings, sentTraffic] = await Promise.all([api('/api/history'), api('/api/site-map'), api('/api/findings'), api('/api/sent-traffic')]);
   state.history = history;
   state.siteMap = siteMap;
   state.findings = findings;
+  state.sentTraffic = sentTraffic;
 }
 
 function renderSiteMap() {
@@ -2278,6 +2341,190 @@ function filteredFindings() {
       .toLowerCase();
     return haystack.includes(query);
   });
+}
+
+function renderSentTraffic() {
+  if (!el.sentTrafficRows) return;
+  const records = Array.isArray(state.sentTraffic) ? state.sentTraffic : [];
+  el.sentTrafficSubtitle.textContent = `${records.length} ${records.length === 1 ? 'request' : 'requests'} sent by MCP`;
+  el.clearSentTrafficBtn.disabled = records.length === 0;
+  el.sentTrafficRows.innerHTML =
+    records
+      .map((record) => {
+        const status = record.error ? 'ERR' : record.statusCode || '-';
+        const rowClass = [record.id === state.selectedSentTrafficId ? 'selected' : '', record.error ? 'error-row' : ''].filter(Boolean).join(' ');
+        const size = `${formatBytes(record.requestSize || 0)} / ${formatBytes(record.responseSize || 0)}`;
+        return `
+          <tr class="${rowClass}" data-sent-traffic-id="${escapeHtml(record.id)}">
+            <td title="${escapeHtml(record.id)}">${escapeHtml(shortSentId(record.id))}</td>
+            <td>${escapeHtml(record.sourceId ? `#${record.sourceId}` : '-')}</td>
+            <td title="${escapeHtml(record.tool || '')}">${escapeHtml(shortToolName(record.tool || 'mcp'))}</td>
+            <td><span class="method-pill small">${escapeHtml(record.method || '-')}</span></td>
+            <td title="${escapeHtml(record.host || '')}">${escapeHtml(record.host || '-')}</td>
+            <td><span class="status-pill ${record.error ? 'error' : ''}">${escapeHtml(String(status))}</span></td>
+            <td>${escapeHtml(size)}</td>
+            <td>${escapeHtml(record.durationMs == null ? '-' : `${record.durationMs}ms`)}</td>
+          </tr>
+        `;
+      })
+      .join('') || '<tr><td colspan="8"><div class="empty-state compact-empty">No MCP-sent traffic yet</div></td></tr>';
+
+  renderSentTrafficDetail();
+}
+
+async function loadSentTraffic(id) {
+  state.selectedSentTrafficId = id;
+  state.selectedSentTraffic = await api(`/api/sent-traffic/${encodeURIComponent(id)}`);
+  renderSentTraffic();
+}
+
+function renderSentTrafficDetail() {
+  if (!el.sentTrafficDetail) return;
+  const record = state.selectedSentTraffic;
+  if (!record) {
+    el.emptySentTrafficDetail.classList.remove('hidden');
+    el.sentTrafficDetail.classList.add('hidden');
+    return;
+  }
+
+  el.emptySentTrafficDetail.classList.add('hidden');
+  el.sentTrafficDetail.classList.remove('hidden');
+  el.sentTrafficMethod.textContent = record.request?.method || '-';
+  el.sentTrafficUrl.textContent = record.request?.url || '';
+  el.sentTrafficStatus.textContent = record.error ? 'ERR' : record.response ? `${record.response.statusCode} ${record.response.statusMessage || ''}`.trim() : '-';
+  el.sentTrafficStatus.classList.toggle('error', Boolean(record.error));
+  setHighlightedHttp(el.sentTrafficRequestRaw, buildRawRequest(record));
+  setHighlightedHttp(el.sentTrafficResponseRaw, record.response ? buildRawResponse(record) : `MCP request failed\r\n\r\n${record.error || 'No response'}`);
+  el.sentTrafficMeta.textContent = JSON.stringify(
+    {
+      id: record.id,
+      sourceId: record.sourceId,
+      tool: record.tool,
+      startedAt: record.startedAt ? new Date(record.startedAt).toISOString() : null,
+      completedAt: record.completedAt ? new Date(record.completedAt).toISOString() : null,
+      durationMs: record.durationMs,
+      error: record.error,
+      notes: record.notes || [],
+    },
+    null,
+    2,
+  );
+}
+
+async function clearSentTraffic() {
+  if (!state.sentTraffic.length) return;
+  if (!window.confirm('Clear MCP-sent traffic log? Captured traffic and Echo tabs will stay intact.')) {
+    return;
+  }
+  state.sentTraffic = await api('/api/sent-traffic', { method: 'DELETE' });
+  state.selectedSentTrafficId = null;
+  state.selectedSentTraffic = null;
+  renderSentTraffic();
+  markProjectDirty();
+}
+
+function shortSentId(id) {
+  const text = String(id || '');
+  const match = text.match(/^sent-([^-]+)-([^-]+)-/);
+  return match ? `#${match[1]} ${match[2]}` : text.slice(0, 18);
+}
+
+function shortToolName(tool) {
+  return String(tool || 'mcp').replace(/^send_/, '').replace(/_proxy_item|_item/g, '').replace(/_/g, ' ');
+}
+
+function renderMcpLog() {
+  if (!el.mcpLogRows) return;
+  const records = Array.isArray(state.mcpExchanges) ? state.mcpExchanges : [];
+  el.mcpLogSubtitle.textContent = `${records.length} ${records.length === 1 ? 'exchange' : 'exchanges'}`;
+  el.clearMcpLogBtn.disabled = records.length === 0;
+  el.mcpLogRows.innerHTML =
+    records
+      .map((record) => {
+        const rowClass = [record.id === state.selectedMcpExchangeId ? 'selected' : '', record.error ? 'error-row' : ''].filter(Boolean).join(' ');
+        const size = `${formatBytes(record.requestBytes || 0)} / ${formatBytes(record.responseBytes || 0)}`;
+        const tool = record.tool ? shortToolName(record.tool) : '-';
+        return `
+          <tr class="${rowClass}" data-mcp-exchange-id="${escapeHtml(record.id)}">
+            <td title="${escapeHtml(record.id)}">${escapeHtml(shortMcpExchangeId(record.id))}</td>
+            <td title="${escapeHtml(record.rpcMethod || '')}">${escapeHtml(record.rpcMethod || '-')}</td>
+            <td title="${escapeHtml(record.tool || '')}">${escapeHtml(tool)}</td>
+            <td><span class="status-pill ${record.error ? 'error' : ''}">${escapeHtml(String(record.status || '-'))}</span></td>
+            <td>${escapeHtml(size)}</td>
+            <td>${escapeHtml(record.durationMs == null ? '-' : `${record.durationMs}ms`)}</td>
+          </tr>
+        `;
+      })
+      .join('') || '<tr><td colspan="6"><div class="empty-state compact-empty">No MCP exchanges yet</div></td></tr>';
+
+  renderMcpLogDetail();
+}
+
+async function loadMcpExchange(id) {
+  state.selectedMcpExchangeId = id;
+  state.selectedMcpExchange = await api(`/api/mcp/exchanges/${encodeURIComponent(id)}`);
+  renderMcpLog();
+}
+
+function renderMcpLogDetail() {
+  if (!el.mcpLogDetail) return;
+  const record = state.selectedMcpExchange;
+  if (!record) {
+    el.emptyMcpLogDetail.classList.remove('hidden');
+    el.mcpLogDetail.classList.add('hidden');
+    return;
+  }
+
+  el.emptyMcpLogDetail.classList.add('hidden');
+  el.mcpLogDetail.classList.remove('hidden');
+  el.mcpLogMethod.textContent = record.rpcMethod || '-';
+  el.mcpLogTool.textContent = record.tool || 'MCP exchange';
+  el.mcpLogStatus.textContent = record.error ? 'ERR' : String(record.status || '-');
+  el.mcpLogStatus.classList.toggle('error', Boolean(record.error));
+  setHighlightedJson(el.mcpLogRequestRaw, record.request);
+  setHighlightedJson(el.mcpLogResponseRaw, record.response || { accepted: true });
+  el.mcpLogMeta.textContent = JSON.stringify(
+    {
+      id: record.id,
+      jsonRpcId: record.jsonRpcId,
+      rpcMethod: record.rpcMethod,
+      tool: record.tool,
+      startedAt: record.startedAt ? new Date(record.startedAt).toISOString() : null,
+      completedAt: record.completedAt ? new Date(record.completedAt).toISOString() : null,
+      durationMs: record.durationMs,
+      status: record.status,
+      error: record.error,
+    },
+    null,
+    2,
+  );
+}
+
+async function clearMcpLog() {
+  if (!state.mcpExchanges.length) return;
+  if (!window.confirm('Clear local MCP exchange log? Captured traffic, Sent, Echo, and findings will stay intact.')) {
+    return;
+  }
+  state.mcpExchanges = await api('/api/mcp/exchanges', { method: 'DELETE' });
+  state.selectedMcpExchangeId = null;
+  state.selectedMcpExchange = null;
+  renderMcpLog();
+  markProjectDirty();
+}
+
+function shortMcpExchangeId(id) {
+  const text = String(id || '');
+  const match = text.match(/^mcp-(\d+)-/);
+  if (!match) {
+    return text.slice(0, 18);
+  }
+  return new Date(Number(match[1])).toLocaleTimeString([], { hour12: false });
+}
+
+function setHighlightedJson(target, value) {
+  const text = JSON.stringify(value == null ? null : value, null, 2);
+  target.dataset.rawText = text;
+  target.innerHTML = renderLineNumberedHighlighted(highlightJson(text));
 }
 
 function buildSiteTree(paths) {
@@ -5067,6 +5314,8 @@ function setView(view) {
     search: 'Search',
     siteMap: 'Site Map',
     findings: 'Findings',
+    sentTraffic: 'Sent Traffic',
+    mcpLog: 'MCP Log',
     scope: 'Scope',
     echo: 'Echo',
     intercept: 'Intercept',
