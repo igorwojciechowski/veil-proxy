@@ -108,7 +108,7 @@ class McpTools {
         ),
         tool(
           'run_payload_attack',
-          'Run an Intruder-like payload attack from a history request. Payloads are inserted into a query/body/cookie/header/path/raw body location. Results are anonymized.',
+          'Run an Intruder-like fuzzer from a history request. Payloads are inserted into a query/body/cookie/header/path/raw body location. Results are anonymized.',
           objectSchema(
             property('id', 'string', 'Visible request id used as the base request.'),
             property('insertionPoint', 'object', 'Insertion point object: type=query|body|cookie|header|path|bodyTemplate|rawBody, name for parameter/header/cookie, optional template containing {{payload}}, optional marker.'),
@@ -130,20 +130,20 @@ class McpTools {
         ),
         tool(
           'list_payload_attack_runs',
-          'List locally recorded payload attack runs. URLs and payload previews are anonymized; raw traffic is never returned.',
+          'List locally recorded fuzzer runs. URLs and payload previews are anonymized; raw traffic is never returned.',
           objectSchema(property('limit', 'integer', 'Maximum number of runs, capped at 100. Defaults to 25.')),
         ),
         tool(
           'get_payload_attack_run',
-          'Return one locally recorded payload attack run with anonymized result summaries. Raw traffic is never returned.',
-          objectSchema(property('id', 'string', 'Payload attack run id from run_payload_attack or list_payload_attack_runs.')),
+          'Return one locally recorded fuzzer run with anonymized result summaries. Raw traffic is never returned.',
+          objectSchema(property('id', 'string', 'Fuzzer run id from run_payload_attack or list_payload_attack_runs.')),
           ['id'],
         ),
         tool(
           'report_payload_attack_issue',
-          'Create a local Veil Proxy finding from a payload attack result. Raw traffic is not returned through MCP.',
+          'Create a local Veil Proxy finding from a fuzzer result. Raw traffic is not returned through MCP.',
           objectSchema(
-            property('id', 'string', 'Payload attack run id.'),
+            property('id', 'string', 'Fuzzer run id.'),
             property('resultIndex', 'integer', 'Payload result index to use as evidence.'),
             property('name', 'string', 'Optional finding name. Alias: title.'),
             property('title', 'string', 'Optional finding title. Alias for name.'),
@@ -166,11 +166,11 @@ class McpTools {
         tool('clear_controlled_payloads', 'Clear registered controlled payloads/canaries.', objectSchema()),
         tool(
           'send_proxy_item_to_echo',
-          'Copy a history request into a local Echo tab or group. MCP returns anonymized metadata only; the raw request stays inside Veil Proxy.',
+          'Copy a history request into a local Relay tab or group. MCP returns anonymized metadata only; the raw request stays inside Veil Proxy.',
           objectSchema(
-            property('id', 'string', 'Visible request id used as the Echo tab source.'),
-            property('tabName', 'string', 'Optional Echo tab title.'),
-            property('groupName', 'string', 'Optional Echo group title. Existing groups with the same title are reused.'),
+            property('id', 'string', 'Visible request id used as the Relay tab source.'),
+            property('tabName', 'string', 'Optional Relay tab title.'),
+            property('groupName', 'string', 'Optional Relay group title. Existing groups with the same title are reused.'),
             property('repeaterGroup', 'string', 'Optional compatibility alias for groupName.'),
             property('color', 'string', 'Optional tab color token: cyan, pink, amber, green, blue, or blank.'),
             property('groupColor', 'string', 'Optional group color token: cyan, pink, amber, green, blue, or blank.'),
@@ -179,12 +179,12 @@ class McpTools {
         ),
         tool(
           'send_random_proxy_item_to_echo',
-          'Copy one random recent request into a local Echo tab or group. MCP returns anonymized metadata only; the raw request stays inside Veil Proxy.',
+          'Copy one random recent request into a local Relay tab or group. MCP returns anonymized metadata only; the raw request stays inside Veil Proxy.',
           objectSchema(
             property('limit', 'integer', 'Newest history window to choose from, capped at 250. Defaults to 100.'),
             property('inScopeOnly', 'boolean', 'Only choose in-scope requests. Defaults to true. Scope guard is still enforced when enabled.'),
-            property('tabName', 'string', 'Optional Echo tab title.'),
-            property('groupName', 'string', 'Optional Echo group title. Existing groups with the same title are reused.'),
+            property('tabName', 'string', 'Optional Relay tab title.'),
+            property('groupName', 'string', 'Optional Relay group title. Existing groups with the same title are reused.'),
             property('repeaterGroup', 'string', 'Optional compatibility alias for groupName.'),
             property('color', 'string', 'Optional tab color token: cyan, pink, amber, green, blue, or blank.'),
             property('groupColor', 'string', 'Optional group color token: cyan, pink, amber, green, blue, or blank.'),
@@ -246,9 +246,9 @@ class McpTools {
             property('bodyParameters', 'object', 'Optional form body parameters to add or update.'),
             property('cookieParameters', 'object', 'Optional cookie parameters to add or update.'),
             property('body', 'string', 'Optional full replacement body. Secret aliases are resolved locally.'),
-            property('createEchoTab', 'boolean', 'Also create an Echo tab with the evidence request. Defaults to false.'),
-            property('tabName', 'string', 'Optional Echo tab title when createEchoTab is true.'),
-            property('groupName', 'string', 'Optional Echo group title when createEchoTab is true.'),
+            property('createEchoTab', 'boolean', 'Also create a Relay tab with the evidence request. Defaults to false.'),
+            property('tabName', 'string', 'Optional Relay tab title when createEchoTab is true.'),
+            property('groupName', 'string', 'Optional Relay group title when createEchoTab is true.'),
           ),
           ['id'],
         ),
@@ -638,7 +638,7 @@ class McpTools {
 
     const executePayload = async (item, baseline) => {
       const sent = await this.proxy.sendEchoRequest(item.request);
-      const record = sentTrafficRecord(String(id), item.index, sent, 'Payload attack');
+      const record = sentTrafficRecord(String(id), item.index, sent, 'Fuzzer');
       const saved = this.recordSentTraffic(record);
       const summary = this.attackSummary(saved, item.payload, item.resolvedPayload, item.index, baseline);
       summary.sentTrafficId = saved.id;
@@ -748,7 +748,7 @@ class McpTools {
     const id = requiredText(args, 'id');
     const record = this.proxy.getPayloadAttack ? this.proxy.getPayloadAttack(id) : null;
     if (!record) {
-      return toolError(`Payload attack run not found: ${id}`);
+      return toolError(`Fuzzer run not found: ${id}`);
     }
     return toolResult({
       ...this.payloadAttackRunSummary(record),
@@ -769,11 +769,11 @@ class McpTools {
     const index = Number(args.resultIndex);
     const record = this.proxy.getPayloadAttack ? this.proxy.getPayloadAttack(id) : null;
     if (!record) {
-      return toolError(`Payload attack run not found: ${id}`);
+      return toolError(`Fuzzer run not found: ${id}`);
     }
     const result = (record.results || []).find((item) => Number(item.index) === index);
     if (!result) {
-      return toolError(`Payload attack result not found: ${id} index ${args.resultIndex}`);
+      return toolError(`Fuzzer result not found: ${id} index ${args.resultIndex}`);
     }
     const issue = {
       name: optionalText(args, 'name', optionalText(args, 'title', attackIssueTitle(result))),
@@ -918,7 +918,7 @@ class McpTools {
     const inScopeOnly = optionalBoolean(args, 'inScopeOnly', true);
     const records = this.history(limit, inScopeOnly).filter((flow) => this.scopeAllows(flow));
     if (records.length === 0) {
-      return toolError('No matching proxy history items are available for Echo.');
+      return toolError('No matching proxy history items are available for Relay.');
     }
     const flow = records[Math.floor(Math.random() * records.length)];
     return this.createEchoTabForFlow(flow, args);
@@ -926,7 +926,7 @@ class McpTools {
 
   createEchoTabForFlow(flow, args = {}) {
     if (!this.uiStateAccess) {
-      return toolError('Echo UI state is unavailable. Start Veil Proxy with the local API server and retry.');
+      return toolError('Relay UI state is unavailable. Start Veil Proxy with the local API server and retry.');
     }
 
     const currentUi = this.uiStateAccess.read() || {};
@@ -955,11 +955,12 @@ class McpTools {
     echo.selectedTabId = tab.id;
     echo.selectedGroupId = group ? group.id : null;
     const nextUi = this.uiStateAccess.write({ echo }) || {};
-    const savedEcho = nextUi.echo || echo;
-    const savedTab = (savedEcho.tabs || []).find((item) => item.id === tab.id) || tab;
+    const savedRelay = nextUi.echo || echo;
+    const savedTab = (savedRelay.tabs || []).find((item) => item.id === tab.id) || tab;
     const summary = this.recordSummary(flow);
 
     return toolResult({
+      sentToRelay: true,
       sentToEcho: true,
       id: summary.id,
       method: summary.method,
@@ -975,7 +976,7 @@ class McpTools {
       rawRequestReturned: false,
       rawResponseReturned: false,
       aliasMappings: this.aliasVault.mappingCount(),
-      note: 'The original raw request was copied into local Echo state. MCP returned anonymized metadata only.',
+      note: 'The original raw request was copied into local Relay state. MCP returned anonymized metadata only.',
     });
   }
 
@@ -1821,12 +1822,12 @@ function attackIssueTitle(result) {
   if (result.payloadReflected) return 'Payload reflected in response';
   if (result.statusChanged) return 'Payload changed response status';
   if (result.error) return 'Payload request produced an error';
-  return 'Interesting payload attack result';
+  return 'Interesting fuzzer result';
 }
 
 function attackIssueDetail(result, record) {
   return [
-    `Payload attack ${record.id} produced an interesting result against ${record.method || '-'} ${record.url || '-'}.`,
+    `Fuzzer ${record.id} produced an interesting result against ${record.method || '-'} ${record.url || '-'}.`,
     `Payload index: ${result.index}.`,
     `Payload preview: ${result.payloadPreview || '-'}.`,
     `Status: ${result.error ? 'ERR' : result.statusCode || '-'}.`,
@@ -1840,7 +1841,7 @@ function attackIssueCategory(result) {
   if (result.securitySignal) return 'Injection';
   if (result.payloadReflected) return 'Reflection';
   if (result.statusChanged) return 'Behavior Change';
-  return 'Payload Attack';
+  return 'Fuzzer';
 }
 
 function attackIssueSeverity(result) {

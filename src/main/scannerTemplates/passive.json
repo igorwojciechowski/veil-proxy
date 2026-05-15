@@ -1,0 +1,236 @@
+[
+  {
+    "id": "stack-trace-disclosure",
+    "title": "Stack trace disclosure",
+    "severity": "medium",
+    "confidence": "firm",
+    "category": "Information Disclosure",
+    "description": "The response contains text that looks like a server-side exception, stack trace, or framework error.",
+    "evidence": "Exception or stack-trace signature in response body.",
+    "matchers": [
+      {
+        "part": "response.body",
+        "type": "regex",
+        "pattern": "\\b(?:Traceback \\(most recent call last\\)|Stack trace|NullPointerException|TypeError:|ReferenceError:|SequelizeDatabaseError|PDOException|ORA-\\d{4,5}|SQLITE_ERROR|MongoError|TemplateSyntaxError|Symfony\\\\Component|Laravel\\\\Framework|Django Version|Express error handler)\\b"
+      }
+    ]
+  },
+  {
+    "id": "debug-header-exposed",
+    "title": "Debug or technology header exposure",
+    "severity": "low",
+    "confidence": "firm",
+    "category": "Information Disclosure",
+    "description": "The response exposes debug, runtime, or framework headers that may help fingerprint the application.",
+    "evidence": "Debug or framework response header.",
+    "matchers": [
+      {
+        "part": "response.headers",
+        "type": "regex",
+        "pattern": "(^|\\n)(?:x-powered-by|x-aspnet-version|x-runtime|x-debug|x-generator|server-timing)\\s*:"
+      }
+    ]
+  },
+  {
+    "id": "sensitive-token-in-url",
+    "title": "Sensitive token in URL",
+    "severity": "high",
+    "confidence": "firm",
+    "category": "Sensitive Data Exposure",
+    "description": "A request URL contains a parameter name commonly used for secrets or session material.",
+    "evidence": "Sensitive-looking query parameter name.",
+    "matchers": [
+      {
+        "part": "request.url",
+        "type": "regex",
+        "pattern": "[?&](?:token|access_token|refresh_token|jwt|api[_-]?key|secret|session|auth|password|passwd)="
+      }
+    ]
+  },
+  {
+    "id": "private-key-disclosure",
+    "title": "Private key disclosure",
+    "severity": "high",
+    "confidence": "firm",
+    "category": "Secret Exposure",
+    "description": "The response body contains a PEM private key marker.",
+    "evidence": "Private key marker in response body.",
+    "matchers": [
+      {
+        "part": "response.body",
+        "type": "regex",
+        "pattern": "-----BEGIN (?:RSA |DSA |EC |OPENSSH |PGP )?PRIVATE KEY-----"
+      }
+    ]
+  },
+  {
+    "id": "cloud-access-key-disclosure",
+    "title": "Cloud access key disclosure",
+    "severity": "high",
+    "confidence": "firm",
+    "category": "Secret Exposure",
+    "description": "The response contains a value that resembles a cloud provider access key.",
+    "evidence": "Cloud access key pattern in response body.",
+    "matchers": [
+      {
+        "part": "response.body",
+        "type": "regex",
+        "pattern": "\\b(?:AKIA|ASIA|AGPA|AIDA)[A-Z0-9]{16}\\b|\\bAIza[0-9A-Za-z_-]{35}\\b"
+      }
+    ]
+  },
+  {
+    "id": "jwt-token-disclosure",
+    "title": "JWT token disclosure",
+    "severity": "medium",
+    "confidence": "tentative",
+    "category": "Secret Exposure",
+    "description": "The response contains a compact JWT-like value.",
+    "evidence": "JWT-like token in response body.",
+    "matchers": [
+      {
+        "part": "response.body",
+        "type": "regex",
+        "pattern": "\\beyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\b"
+      }
+    ]
+  },
+  {
+    "id": "env-file-exposure",
+    "title": "Environment file exposure",
+    "severity": "high",
+    "confidence": "firm",
+    "category": "Configuration Exposure",
+    "description": "A captured response looks like a dotenv or environment configuration file.",
+    "evidence": "Environment variable assignments in response body.",
+    "matchers": [
+      {
+        "part": "response.body",
+        "type": "regex",
+        "pattern": "(?m)^(?:APP_KEY|APP_SECRET|DATABASE_URL|DB_PASSWORD|JWT_SECRET|SECRET_KEY|AWS_SECRET_ACCESS_KEY|MAIL_PASSWORD)="
+      }
+    ]
+  },
+  {
+    "id": "git-config-exposure",
+    "title": "Git config exposure",
+    "severity": "medium",
+    "confidence": "firm",
+    "category": "Configuration Exposure",
+    "description": "A captured response appears to expose a Git repository config file.",
+    "evidence": "Git config markers in response body.",
+    "matchers": [
+      {
+        "part": "request.path",
+        "type": "regex",
+        "pattern": "/\\.git/config$"
+      },
+      {
+        "part": "response.body",
+        "type": "regex",
+        "pattern": "\\[core\\][\\s\\S]{0,300}repositoryformatversion"
+      }
+    ]
+  },
+  {
+    "id": "backup-or-archive-exposure",
+    "title": "Backup or archive file exposure",
+    "severity": "medium",
+    "confidence": "tentative",
+    "category": "File Exposure",
+    "description": "A successful response was returned for a path that looks like a backup, dump, or archive file.",
+    "evidence": "Successful response for backup-like path.",
+    "matchers": [
+      {
+        "part": "request.path",
+        "type": "regex",
+        "pattern": "\\.(?:bak|backup|old|orig|save|sql|dump|zip|tar|tgz|gz|7z|rar)$"
+      },
+      {
+        "type": "status_range",
+        "min": 200,
+        "max": 299
+      }
+    ]
+  },
+  {
+    "id": "directory-listing",
+    "title": "Directory listing enabled",
+    "severity": "medium",
+    "confidence": "firm",
+    "category": "File Exposure",
+    "description": "The response body resembles an auto-generated directory index.",
+    "evidence": "Directory index markers in response body.",
+    "matchers": [
+      {
+        "part": "response.body",
+        "type": "regex",
+        "pattern": "<title>Index of /|<h1>Index of /|Directory listing for /"
+      }
+    ]
+  },
+  {
+    "id": "phpinfo-exposure",
+    "title": "phpinfo exposure",
+    "severity": "medium",
+    "confidence": "firm",
+    "category": "Information Disclosure",
+    "description": "The response appears to expose a PHP runtime information page.",
+    "evidence": "phpinfo markers in response body.",
+    "matchers": [
+      {
+        "part": "response.body",
+        "type": "regex",
+        "pattern": "<title>phpinfo\\(\\)</title>|PHP Version =>|<h1 class=\"p\">PHP Version"
+      }
+    ]
+  },
+  {
+    "id": "swagger-or-openapi-exposure",
+    "title": "Swagger or OpenAPI document exposure",
+    "severity": "low",
+    "confidence": "firm",
+    "category": "API Exposure",
+    "description": "The response appears to expose an API specification or Swagger UI.",
+    "evidence": "OpenAPI or Swagger markers in response body.",
+    "matchers": [
+      {
+        "part": "response.body",
+        "type": "regex",
+        "pattern": "\"openapi\"\\s*:\\s*\"3\\.|\"swagger\"\\s*:\\s*\"2\\.|Swagger UI|swagger-ui"
+      }
+    ]
+  },
+  {
+    "id": "graphql-introspection",
+    "title": "GraphQL introspection data exposed",
+    "severity": "medium",
+    "confidence": "firm",
+    "category": "API Exposure",
+    "description": "The response contains GraphQL introspection structures.",
+    "evidence": "GraphQL introspection markers in response body.",
+    "matchers": [
+      {
+        "part": "response.body",
+        "type": "regex",
+        "pattern": "\"__schema\"\\s*:[\\s\\S]{0,1000}\"types\"\\s*:"
+      }
+    ]
+  },
+  {
+    "id": "graphql-error-disclosure",
+    "title": "GraphQL error disclosure",
+    "severity": "low",
+    "confidence": "tentative",
+    "category": "API Exposure",
+    "description": "The response contains GraphQL error text that may reveal schema details.",
+    "evidence": "GraphQL error markers in response body.",
+    "matchers": [
+      {
+        "part": "response.body",
+        "type": "regex",
+        "pattern": "Cannot query field|Unknown argument|GraphQLError|Did you mean"
+      }
+    ]
+  }
+]

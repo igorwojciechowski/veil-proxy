@@ -29,6 +29,7 @@ const state = {
     method: [],
     status: [],
     host: [],
+    source: [],
   },
   trafficInScopeOnly: false,
   trafficExtensionFilter: {
@@ -83,6 +84,7 @@ const state = {
   payloadAttackSort: 'startedAt:desc',
   payloadAttackResultFilter: 'all',
   payloadAttackResultSort: 'index:asc',
+  activeMcpTab: 'sentTraffic',
   selectedMcpExchangeId: null,
   selectedMcpExchange: null,
   echoTabs: [],
@@ -90,6 +92,18 @@ const state = {
   selectedEchoGroupId: null,
   selectedEchoTabId: null,
   echoPersistenceReady: false,
+  attackTabs: [],
+  selectedAttackTabId: null,
+  attackPersistenceReady: false,
+  echoPaneLayout: {
+    showRequest: true,
+    showResponse: true,
+  },
+  attackPaneLayout: {
+    showRequest: true,
+    showPayload: true,
+    split: 50,
+  },
   openEchoColorPicker: null,
   echoSplit: 50,
   echoContextFlowId: null,
@@ -105,6 +119,7 @@ const el = {
   findingsCount: document.querySelector('#findingsCount'),
   upstreamStatus: document.querySelector('#upstreamStatus'),
   proxyAddress: document.querySelector('#proxyAddress'),
+  mcpPanels: document.querySelector('#mcpPanels'),
   requestInterceptToggle: document.querySelector('#requestInterceptToggle'),
   responseInterceptToggle: document.querySelector('#responseInterceptToggle'),
   trafficSplit: document.querySelector('#trafficSplit'),
@@ -120,6 +135,7 @@ const el = {
   trafficSearch: document.querySelector('#trafficSearch'),
   trafficMethodFilter: document.querySelector('#trafficMethodFilter'),
   trafficStatusFilter: document.querySelector('#trafficStatusFilter'),
+  trafficSourceFilter: document.querySelector('#trafficSourceFilter'),
   trafficHostFilter: document.querySelector('#trafficHostFilter'),
   trafficExtensionInclude: document.querySelector('#trafficExtensionInclude'),
   trafficExtensionExclude: document.querySelector('#trafficExtensionExclude'),
@@ -197,6 +213,9 @@ const el = {
   echoGroupList: document.querySelector('#echoGroupList'),
   newEchoTabBtn: document.querySelector('#newEchoTabBtn'),
   newEchoGroupBtn: document.querySelector('#newEchoGroupBtn'),
+  echoPaneToolbar: document.querySelector('#echoPaneToolbar'),
+  showEchoRequestToggle: document.querySelector('#showEchoRequestToggle'),
+  showEchoResponseToggle: document.querySelector('#showEchoResponseToggle'),
   emptyEcho: document.querySelector('#emptyEcho'),
   echoWorkspace: document.querySelector('#echoWorkspace'),
   echoPaneResizer: document.querySelector('#echoPaneResizer'),
@@ -208,8 +227,37 @@ const el = {
   echoResponseStatus: document.querySelector('#echoResponseStatus'),
   echoResponseMeta: document.querySelector('#echoResponseMeta'),
   echoRawResponse: document.querySelector('#echoRawResponse'),
+  attackTabs: document.querySelector('#attackTabs'),
+  newAttackTabBtn: document.querySelector('#newAttackTabBtn'),
+  attackPaneToolbar: document.querySelector('#attackPaneToolbar'),
+  showAttackRequestToggle: document.querySelector('#showAttackRequestToggle'),
+  showAttackPayloadToggle: document.querySelector('#showAttackPayloadToggle'),
+  emptyAttackTool: document.querySelector('#emptyAttackTool'),
+  attackWorkspace: document.querySelector('#attackWorkspace'),
+  attackPaneResizer: document.querySelector('#attackPaneResizer'),
+  attackRequestSubtitle: document.querySelector('#attackRequestSubtitle'),
+  attackTabName: document.querySelector('#attackTabName'),
+  attackRawRequest: document.querySelector('#attackRawRequest'),
+  attackRawRequestHighlight: document.querySelector('#attackRawRequestHighlight'),
+  markAttackSelectionBtn: document.querySelector('#markAttackSelectionBtn'),
+  clearAttackPointsBtn: document.querySelector('#clearAttackPointsBtn'),
+  attackPointRows: document.querySelector('#attackPointRows'),
+  attackListSelect: document.querySelector('#attackListSelect'),
+  attackListName: document.querySelector('#attackListName'),
+  attackListFile: document.querySelector('#attackListFile'),
+  newAttackListBtn: document.querySelector('#newAttackListBtn'),
+  deleteAttackListBtn: document.querySelector('#deleteAttackListBtn'),
+  attackMode: document.querySelector('#attackMode'),
+  attackConcurrency: document.querySelector('#attackConcurrency'),
+  attackDelay: document.querySelector('#attackDelay'),
+  attackPayloadText: document.querySelector('#attackPayloadText'),
+  runAttackBtn: document.querySelector('#runAttackBtn'),
+  attackStatus: document.querySelector('#attackStatus'),
+  attackResultRows: document.querySelector('#attackResultRows'),
   contextMenu: document.querySelector('#contextMenu'),
   sendToEchoContextBtn: document.querySelector('#sendToEchoContextBtn'),
+  sendToAttackContextBtn: document.querySelector('#sendToAttackContextBtn'),
+  runActiveScanContextBtn: document.querySelector('#runActiveScanContextBtn'),
   showFlowsContextBtn: document.querySelector('#showFlowsContextBtn'),
   addToScopeContextBtn: document.querySelector('#addToScopeContextBtn'),
   removeFromScopeContextBtn: document.querySelector('#removeFromScopeContextBtn'),
@@ -324,6 +372,7 @@ let siteMapLoadTimer = null;
 let findingsLoadTimer = null;
 let globalSearchTimer = null;
 let echoPersistTimer = null;
+let attackPersistTimer = null;
 let recoveryDraftTimer = null;
 
 const GLOBAL_SEARCH_DELAY_MS = 280;
@@ -334,24 +383,24 @@ const SITE_HOST_ROW_HEIGHT = 74;
 const SITE_TREE_ROW_HEIGHT = 74;
 const STATIC_EXTENSIONS = 'jpg,jpeg,png,gif,webp,avif,svg,ico,css,js,map,woff,woff2,ttf,eot,otf';
 const BUILTIN_TRAFFIC_PRESETS = [
-  { id: 'all', name: 'All traffic', filter: { search: '', inScopeOnly: false, filters: { method: [], status: [], host: [] }, extension: { include: '', exclude: '' } } },
-  { id: 'in-scope', name: 'Only in scope', filter: { search: '', inScopeOnly: true, filters: { method: [], status: [], host: [] }, extension: { include: '', exclude: '' } } },
-  { id: 'errors', name: 'Only errors', filter: { search: '', inScopeOnly: false, filters: { method: [], status: ['error'], host: [] }, extension: { include: '', exclude: '' } } },
+  { id: 'all', name: 'All traffic', filter: { search: '', inScopeOnly: false, filters: { method: [], status: [], host: [], source: [] }, extension: { include: '', exclude: '' } } },
+  { id: 'in-scope', name: 'Only in scope', filter: { search: '', inScopeOnly: true, filters: { method: [], status: [], host: [], source: [] }, extension: { include: '', exclude: '' } } },
+  { id: 'errors', name: 'Only errors', filter: { search: '', inScopeOnly: false, filters: { method: [], status: ['error'], host: [], source: [] }, extension: { include: '', exclude: '' } } },
   {
     id: 'auth-session',
     name: 'Auth/session',
-    filter: { search: 'auth,login,session,cookie,token,jwt,bearer,password,oauth', inScopeOnly: false, filters: { method: [], status: [], host: [] }, extension: { include: '', exclude: '' } },
+    filter: { search: 'auth,login,session,cookie,token,jwt,bearer,password,oauth', inScopeOnly: false, filters: { method: [], status: [], host: [], source: [] }, extension: { include: '', exclude: '' } },
   },
   {
     id: 'api-only',
     name: 'API only',
-    filter: { search: '/api,/rest,/graphql,/v1,/v2', inScopeOnly: false, filters: { method: [], status: [], host: [] }, extension: { include: '', exclude: STATIC_EXTENSIONS } },
+    filter: { search: '/api,/rest,/graphql,/v1,/v2', inScopeOnly: false, filters: { method: [], status: [], host: [], source: [] }, extension: { include: '', exclude: STATIC_EXTENSIONS } },
   },
-  { id: '4xx-5xx', name: '4xx/5xx', filter: { search: '', inScopeOnly: false, filters: { method: [], status: ['4xx', '5xx'], host: [] }, extension: { include: '', exclude: '' } } },
+  { id: '4xx-5xx', name: '4xx/5xx', filter: { search: '', inScopeOnly: false, filters: { method: [], status: ['4xx', '5xx'], host: [], source: [] }, extension: { include: '', exclude: '' } } },
   {
     id: 'exclude-static-ext',
     name: 'Exclude static extensions',
-    filter: { search: '', inScopeOnly: false, filters: { method: [], status: [], host: [] }, extension: { include: '', exclude: STATIC_EXTENSIONS } },
+    filter: { search: '', inScopeOnly: false, filters: { method: [], status: [], host: [], source: [] }, extension: { include: '', exclude: STATIC_EXTENSIONS } },
   },
 ];
 const SCOPE_PRESETS = {
@@ -375,9 +424,28 @@ const payloadAttacksView = window.VeilPayloadAttacks?.create({
   renderMeta,
   shortSentId,
 });
+const userAttacksView = window.VeilUserAttacks?.create({
+  state,
+  el,
+  api,
+  escapeHtml,
+  formatError,
+  markProjectDirty,
+  setView,
+  buildRawRequest,
+  parseRawRequestMeta,
+  renderLineNumberedHighlighted,
+  highlightHttpMessage,
+  formatBytes,
+  schedulePersist: schedulePersistAttackState,
+  renderPaneLayout: renderAttackPaneLayout,
+});
+
+const MCP_PANEL_IDS = ['sentTraffic', 'mcpLog', 'payloadAttacks', 'secrets', 'mcpConfig'];
 
 window.addEventListener('pagehide', () => {
   flushEchoState();
+  flushAttackState();
   flushTrafficPresets();
   flushRecoveryDraft();
 });
@@ -394,9 +462,14 @@ async function init() {
 
 function bindUi() {
   bindDesktopProjectCommands();
+  setupMcpWorkspace();
 
   document.querySelectorAll('.nav-item').forEach((button) => {
     button.addEventListener('click', () => setView(button.dataset.view));
+  });
+
+  document.querySelectorAll('[data-mcp-tab]').forEach((button) => {
+    button.addEventListener('click', () => setMcpTab(button.dataset.mcpTab));
   });
 
   document.querySelectorAll('.tab').forEach((button) => {
@@ -432,7 +505,7 @@ function bindUi() {
     state.trafficAdvancedOpen = !state.trafficAdvancedOpen;
     renderTrafficAdvancedState();
   });
-  [el.trafficMethodFilter, el.trafficStatusFilter, el.trafficHostFilter, el.trafficScopeFilter].forEach((container) => {
+  [el.trafficMethodFilter, el.trafficStatusFilter, el.trafficSourceFilter, el.trafficHostFilter, el.trafficScopeFilter].forEach((container) => {
     container.addEventListener('change', handleTrafficCheckboxFilterChange);
   });
   document.addEventListener('click', closeTrafficFiltersOnOutside);
@@ -549,6 +622,12 @@ function bindUi() {
   el.echoRawRequest.addEventListener('input', syncSelectedEchoRequest);
   el.echoRawRequest.addEventListener('scroll', syncEchoRawEditorScroll);
   el.echoPaneResizer.addEventListener('mousedown', startEchoPaneResize);
+  el.showEchoRequestToggle.addEventListener('change', () => setEchoPaneLayout({ showRequest: el.showEchoRequestToggle.checked }));
+  el.showEchoResponseToggle.addEventListener('change', () => setEchoPaneLayout({ showResponse: el.showEchoResponseToggle.checked }));
+  el.attackPaneResizer?.addEventListener('mousedown', startAttackPaneResize);
+  el.showAttackRequestToggle?.addEventListener('change', () => setAttackPaneLayout({ showRequest: el.showAttackRequestToggle.checked }));
+  el.showAttackPayloadToggle?.addEventListener('change', () => setAttackPaneLayout({ showPayload: el.showAttackPayloadToggle.checked }));
+  userAttacksView?.bind();
   document.addEventListener('contextmenu', openEchoContextMenu);
   document.addEventListener('click', closeContextMenu);
   window.addEventListener('blur', closeContextMenu);
@@ -557,6 +636,22 @@ function bindUi() {
     closeContextMenu();
     if (flowId) {
       sendFlowToEcho(flowId);
+    }
+  });
+  el.sendToAttackContextBtn?.addEventListener('click', () => {
+    const flowId = state.contextTarget?.echoFlowId || state.echoContextFlowId || state.contextFlowId;
+    closeContextMenu();
+    if (flowId) {
+      sendFlowToAttack(flowId);
+    }
+  });
+  el.runActiveScanContextBtn?.addEventListener('click', () => {
+    const flowId = state.contextTarget?.echoFlowId || state.echoContextFlowId || state.contextFlowId;
+    closeContextMenu();
+    if (flowId) {
+      runActiveScan(flowId).catch((error) => {
+        el.findingsSubtitle.textContent = `Active scan failed: ${formatError(error)}`;
+      });
     }
   });
   el.showFlowsContextBtn.addEventListener('click', showContextFlows);
@@ -630,6 +725,13 @@ function bindUi() {
 
   el.saveProxyBtn.addEventListener('click', saveProxyConfig);
   el.saveMcpBtn?.addEventListener('click', saveMcpConfig);
+  el.mcpEnabledToggle?.addEventListener('change', () => {
+    if (el.mcpEnabledToggle.checked && !hasConfiguredMcpScope()) {
+      el.mcpEnabledToggle.checked = false;
+      el.mcpStatus.textContent = 'Cannot enable MCP: scope is not configured. Add an enabled include rule in Scope first.';
+      el.mcpEndpoint.textContent = 'MCP disabled';
+    }
+  });
   el.saveAnonymizationBtn?.addEventListener('click', saveAnonymizationConfig);
   el.anonymizationProfile?.addEventListener('change', applyAnonymizationProfileDraft);
   [
@@ -723,6 +825,33 @@ function bindUi() {
   });
 }
 
+function setupMcpWorkspace() {
+  if (!el.mcpPanels || el.mcpPanels.dataset.ready === 'true') return;
+  for (const id of MCP_PANEL_IDS) {
+    const panel = document.querySelector(`#${id}View`);
+    if (!panel) continue;
+    panel.classList.remove('view', 'active');
+    panel.classList.add('mcp-subview');
+    panel.dataset.mcpPanel = id;
+    el.mcpPanels.appendChild(panel);
+  }
+  el.mcpPanels.dataset.ready = 'true';
+  setMcpTab(state.activeMcpTab || 'sentTraffic');
+}
+
+function setMcpTab(tab) {
+  const nextTab = MCP_PANEL_IDS.includes(tab) ? tab : 'sentTraffic';
+  state.activeMcpTab = nextTab;
+  document.querySelectorAll('[data-mcp-tab]').forEach((button) => {
+    const active = button.dataset.mcpTab === nextTab;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+  document.querySelectorAll('[data-mcp-panel]').forEach((panel) => {
+    panel.classList.toggle('active', panel.dataset.mcpPanel === nextTab);
+  });
+}
+
 function openEvents() {
   const events = new EventSource('/api/events');
   events.addEventListener('state', (event) => applyState(JSON.parse(event.data), false, { renderConfig: !state.config }));
@@ -797,23 +926,28 @@ function applyState(payload, forceUi = false, options = {}) {
 function applyUiState(ui, force = false) {
   const forceTraffic = force || ui?.forceTraffic === true;
   const forceEcho = force || ui?.forceEcho === true;
+  const forceAttacks = force || ui?.forceAttacks === true;
 
   if (ui?.traffic && (!state.trafficPersistenceReady || forceTraffic)) {
     state.trafficPresets = sanitizeTrafficPresets(ui.traffic.presets);
     state.trafficPersistenceReady = true;
   }
 
-  if (!ui?.echo || (state.echoPersistenceReady && !forceEcho)) {
-    return;
+  if (ui?.attacks && (!state.attackPersistenceReady || forceAttacks)) {
+    state.attackTabs = Array.isArray(ui.attacks.tabs) ? ui.attacks.tabs : [];
+    state.selectedAttackTabId = ui.attacks.selectedTabId || state.attackTabs[0]?.id || null;
+    state.attackPersistenceReady = true;
   }
 
-  const echo = ui.echo;
-  state.echoTabs = Array.isArray(echo.tabs) ? echo.tabs : [];
-  state.echoGroups = Array.isArray(echo.groups) ? echo.groups : [];
-  state.selectedEchoTabId = echo.selectedTabId || state.echoTabs[0]?.id || null;
-  state.selectedEchoGroupId = echo.selectedGroupId || null;
-  state.echoSplit = clampNumber(echo.split, 25, 75, 50);
-  state.echoPersistenceReady = true;
+  if (ui?.echo && (!state.echoPersistenceReady || forceEcho)) {
+    const echo = ui.echo;
+    state.echoTabs = Array.isArray(echo.tabs) ? echo.tabs : [];
+    state.echoGroups = Array.isArray(echo.groups) ? echo.groups : [];
+    state.selectedEchoTabId = echo.selectedTabId || state.echoTabs[0]?.id || null;
+    state.selectedEchoGroupId = echo.selectedGroupId || null;
+    state.echoSplit = clampNumber(echo.split, 25, 75, 50);
+    state.echoPersistenceReady = true;
+  }
 }
 
 function upsertHistory(flow) {
@@ -849,10 +983,54 @@ function renderAll(options = {}) {
   payloadAttacksView?.render();
   renderMcpLog();
   renderSecrets();
+  userAttacksView?.render();
   renderEcho();
   renderPending();
   renderDetail();
   updateScopeMatchCounts();
+}
+
+function renderAttackPaneLayout() {
+  if (!el.attackWorkspace) return;
+  const layout = state.attackPaneLayout;
+  const split = Math.max(25, Math.min(75, Number(layout.split) || 50));
+  el.attackWorkspace.classList.toggle('hide-request', !layout.showRequest);
+  el.attackWorkspace.classList.toggle('hide-payload', !layout.showPayload);
+  el.attackWorkspace.style.setProperty('--attack-request-size', `${split}%`);
+  el.attackWorkspace.style.setProperty('--attack-payload-size', `${100 - split}%`);
+  if (el.showAttackRequestToggle) el.showAttackRequestToggle.checked = layout.showRequest;
+  if (el.showAttackPayloadToggle) el.showAttackPayloadToggle.checked = layout.showPayload;
+}
+
+function setAttackPaneLayout(partial) {
+  state.attackPaneLayout = {
+    ...state.attackPaneLayout,
+    ...partial,
+  };
+  if (!state.attackPaneLayout.showRequest && !state.attackPaneLayout.showPayload) {
+    state.attackPaneLayout.showPayload = true;
+  }
+  renderAttackPaneLayout();
+}
+
+function startAttackPaneResize(event) {
+  event.preventDefault();
+  if (!state.attackPaneLayout.showRequest || !state.attackPaneLayout.showPayload) return;
+  const bounds = el.attackWorkspace.getBoundingClientRect();
+
+  const onMove = (moveEvent) => {
+    const next = ((moveEvent.clientX - bounds.left) / bounds.width) * 100;
+    state.attackPaneLayout.split = Math.max(25, Math.min(75, Math.round(next)));
+    renderAttackPaneLayout();
+  };
+
+  const onUp = () => {
+    window.removeEventListener('mousemove', onMove);
+    window.removeEventListener('mouseup', onUp);
+  };
+
+  window.addEventListener('mousemove', onMove);
+  window.addEventListener('mouseup', onUp);
 }
 
 function renderMeta() {
@@ -873,6 +1051,7 @@ function renderConfig(options = {}) {
   const { intercept } = state.config;
   const preserveActive = options.force !== true;
   const editingSettings = preserveActive && isActiveEditableIn(document.querySelector('#settingsView'));
+  const editingMcpConfig = preserveActive && isActiveEditableIn(document.querySelector('#mcpConfigView'));
   const editingScope = preserveActive && isActiveEditableIn(document.querySelector('#scopeView'));
   const editingRules = preserveActive && isActiveEditableIn(el.rulesModal);
 
@@ -884,10 +1063,12 @@ function renderConfig(options = {}) {
   if (!editingSettings) {
     el.proxyHost.value = state.config.proxyHost;
     el.proxyPort.value = state.config.proxyPort;
-    renderMcpConfig();
-    renderAnonymizationConfig();
     renderUpstreamRules();
     renderRewriteRules();
+  }
+  if (!editingMcpConfig) {
+    renderMcpConfig();
+    renderAnonymizationConfig();
   }
   if (!editingScope) {
     renderScopeRules();
@@ -1335,10 +1516,21 @@ function renderMcpConfig() {
   } else if (config.enabled && runtime.lastError) {
     el.mcpEndpoint.textContent = 'MCP failed to start';
     el.mcpStatus.textContent = runtime.lastError;
+  } else if (!hasConfiguredMcpScope()) {
+    el.mcpEndpoint.textContent = 'MCP disabled';
+    el.mcpStatus.textContent = 'Set an enabled include scope rule before enabling MCP.';
   } else {
     el.mcpEndpoint.textContent = 'MCP disabled';
     el.mcpStatus.textContent = 'MCP returns anonymized data only. Real secret values are never returned.';
   }
+}
+
+function hasConfiguredMcpScope() {
+  const scope = state.config?.scope || {};
+  if (scope.enabled !== true) return false;
+  return (scope.rules || []).some(
+    (rule) => rule?.enabled !== false && rule.action !== 'exclude' && String(rule.value || '').trim(),
+  );
 }
 
 function renderAnonymizationConfig() {
@@ -1700,9 +1892,9 @@ function renderTrafficRows(rows) {
   const window = virtualWindow(el.trafficTableWrap, state.virtual.traffic, rows.length, TRAFFIC_ROW_HEIGHT);
   const visibleRows = rows.slice(window.start, window.end);
   el.trafficRows.innerHTML = `
-    ${renderTrafficSpacerRow(window.top, 8)}
+    ${renderTrafficSpacerRow(window.top, 9)}
     ${visibleRows.map(renderTrafficRow).join('')}
-    ${renderTrafficSpacerRow(window.bottom, 8)}
+    ${renderTrafficSpacerRow(window.bottom, 9)}
   `;
 }
 
@@ -1719,10 +1911,12 @@ function renderTrafficRow(flow) {
   const duration = flow.durationMs === null || flow.durationMs === undefined ? 'open' : `${flow.durationMs}ms`;
   const echoAttr = flow.type === 'http' ? `data-echo-flow-id="${escapeHtml(flow.id)}"` : '';
   const scopeLabel = flow.inScope ? 'in' : 'out';
+  const source = trafficSourceMeta(flow);
   const rowClasses = [flow.id === state.selectedFlowId ? 'selected' : '', flow.error ? 'error-row' : ''].filter(Boolean).join(' ');
   return `
     <tr data-flow-id="${escapeHtml(flow.id)}" ${echoAttr} class="${rowClasses}">
       <td class="flow-id-cell">#${escapeHtml(flow.id)}</td>
+      <td><span class="source-chip source-${escapeHtml(source.key)}" title="${escapeHtml(source.title)}">${escapeHtml(source.label)}</span></td>
       <td><span class="method-pill">${escapeHtml(flow.method)}</span></td>
       <td title="${escapeHtml(flow.host || '')}">${escapeHtml(flow.host || '')}</td>
       <td title="${escapeHtml(path || '')}">${escapeHtml(path || '')}</td>
@@ -1787,8 +1981,10 @@ function renderTrafficFilterControls() {
   const traffic = trafficHistory();
   const methods = uniqueSorted(traffic.map((flow) => flow.method).filter(Boolean));
   const hosts = uniqueSorted(traffic.map((flow) => flow.host).filter(Boolean));
+  const sources = trafficSourceOptions(traffic);
   state.trafficFilters.method = state.trafficFilters.method.filter((method) => methods.includes(method));
   state.trafficFilters.host = state.trafficFilters.host.filter((host) => hosts.includes(host));
+  state.trafficFilters.source = state.trafficFilters.source.filter((source) => sources.some(([value]) => value === source));
   renderTrafficPresetSelect();
   if (document.activeElement !== el.trafficExtensionInclude) {
     el.trafficExtensionInclude.value = state.trafficExtensionFilter.include;
@@ -1810,6 +2006,7 @@ function renderTrafficFilterControls() {
     ['error', 'Errors'],
     ['open', 'Open'],
   ]);
+  renderCheckboxFilter(el.trafficSourceFilter, 'source', sources);
   renderCheckboxFilter(
     el.trafficHostFilter,
     'host',
@@ -1949,6 +2146,7 @@ function currentTrafficFilterSnapshot() {
       method: [...state.trafficFilters.method],
       status: [...state.trafficFilters.status],
       host: [...state.trafficFilters.host],
+      source: [...state.trafficFilters.source],
     },
     extension: {
       include: state.trafficExtensionFilter.include,
@@ -1980,6 +2178,7 @@ function normalizeTrafficFilterSnapshot(snapshot) {
       method: Array.isArray(filters.method) ? filters.method.map(String).filter(Boolean) : [],
       status: Array.isArray(filters.status) ? filters.status.map(String).filter(Boolean) : [],
       host: Array.isArray(filters.host) ? filters.host.map(String).filter(Boolean) : [],
+      source: Array.isArray(filters.source) ? filters.source.map(sanitizeTrafficSourceKey).filter(Boolean) : [],
     },
     extension: normalizedExtension,
   };
@@ -2016,6 +2215,7 @@ function resetTrafficFilters() {
     method: [],
     status: [],
     host: [],
+    source: [],
   };
   state.trafficInScopeOnly = false;
   state.trafficExtensionFilter = { include: '', exclude: '' };
@@ -2498,7 +2698,7 @@ function filteredFindings() {
 function renderSentTraffic() {
   if (!el.sentTrafficRows) return;
   const records = Array.isArray(state.sentTraffic) ? state.sentTraffic : [];
-  el.sentTrafficSubtitle.textContent = `${records.length} ${records.length === 1 ? 'request' : 'requests'} sent by MCP`;
+  el.sentTrafficSubtitle.textContent = `${records.length} ${records.length === 1 ? 'request' : 'requests'} issued by MCP`;
   el.clearSentTrafficBtn.disabled = records.length === 0;
   el.sentTrafficRows.innerHTML =
     records
@@ -2519,7 +2719,7 @@ function renderSentTraffic() {
           </tr>
         `;
       })
-      .join('') || '<tr><td colspan="8"><div class="empty-state compact-empty">No MCP-sent traffic yet</div></td></tr>';
+      .join('') || '<tr><td colspan="8"><div class="empty-state compact-empty">No MCP-issued HTTP yet</div></td></tr>';
 
   renderSentTrafficDetail();
 }
@@ -2565,7 +2765,7 @@ function renderSentTrafficDetail() {
 
 async function clearSentTraffic() {
   if (!state.sentTraffic.length) return;
-  if (!window.confirm('Clear MCP-sent traffic log? Captured traffic and Echo tabs will stay intact.')) {
+  if (!window.confirm('Clear MCP-issued HTTP log? Captured traffic and Relay tabs will stay intact.')) {
     return;
   }
   state.sentTraffic = await api('/api/sent-traffic', { method: 'DELETE' });
@@ -2654,7 +2854,7 @@ function renderMcpLogDetail() {
 
 async function clearMcpLog() {
   if (!state.mcpExchanges.length) return;
-  if (!window.confirm('Clear local MCP exchange log? Captured traffic, Sent, Echo, and findings will stay intact.')) {
+  if (!window.confirm('Clear local MCP exchange log? Captured traffic, Sent, Relay, and findings will stay intact.')) {
     return;
   }
   state.mcpExchanges = await api('/api/mcp/exchanges', { method: 'DELETE' });
@@ -3051,8 +3251,7 @@ function renderEcho() {
   normalizeEchoGroups();
 
   el.echoTabs.innerHTML = renderEchoTabGroups();
-  el.echoWorkspace.style.setProperty('--echo-request-size', `${state.echoSplit}%`);
-  el.echoWorkspace.style.setProperty('--echo-response-size', `${100 - state.echoSplit}%`);
+  renderEchoPaneLayout();
 
   el.echoTabs.querySelectorAll('[data-echo-tab-id]').forEach((button) => {
     button.addEventListener('click', () => {
@@ -3104,11 +3303,13 @@ function renderEcho() {
 
   const tab = selectedEchoTab();
   if (!tab) {
+    el.echoPaneToolbar.classList.add('hidden');
     el.emptyEcho.classList.remove('hidden');
     el.echoWorkspace.classList.add('hidden');
     return;
   }
 
+  el.echoPaneToolbar.classList.remove('hidden');
   el.emptyEcho.classList.add('hidden');
   el.echoWorkspace.classList.remove('hidden');
   el.echoRequestSubtitle.textContent = tab.source || 'Editable request';
@@ -3252,7 +3453,7 @@ function renderEchoResponse(tab) {
   if (tab.error) {
     el.echoResponseStatus.textContent = 'ERR';
     el.echoResponseMeta.textContent = tab.durationMs ? `${tab.durationMs}ms` : 'Request failed';
-    setHighlightedHttp(el.echoRawResponse, `Echo request failed\r\n\r\n${tab.error}`);
+    setHighlightedHttp(el.echoRawResponse, `Relay request failed\r\n\r\n${tab.error}`);
     return;
   }
 
@@ -3266,6 +3467,30 @@ function renderEchoResponse(tab) {
   el.echoResponseStatus.textContent = `${tab.response.statusCode || '-'} ${tab.response.statusMessage || ''}`.trim();
   el.echoResponseMeta.textContent = `${formatBytes(base64ByteLength(tab.response.bodyBase64 || ''))} · ${tab.durationMs ?? '-'}ms`;
   setHighlightedHttp(el.echoRawResponse, buildRawResponse({ response: tab.response }));
+}
+
+function setEchoPaneLayout(partial) {
+  state.echoPaneLayout = {
+    ...state.echoPaneLayout,
+    ...partial,
+  };
+  if (!state.echoPaneLayout.showRequest && !state.echoPaneLayout.showResponse) {
+    state.echoPaneLayout.showResponse = true;
+  }
+  renderEchoPaneLayout();
+  schedulePersistEchoState({ dirty: false });
+}
+
+function renderEchoPaneLayout() {
+  if (!el.echoWorkspace) return;
+  const layout = state.echoPaneLayout;
+  const split = Math.max(25, Math.min(75, Number(state.echoSplit) || 50));
+  el.echoWorkspace.classList.toggle('hide-request', !layout.showRequest);
+  el.echoWorkspace.classList.toggle('hide-response', !layout.showResponse);
+  el.echoWorkspace.style.setProperty('--echo-request-size', `${split}%`);
+  el.echoWorkspace.style.setProperty('--echo-response-size', `${100 - split}%`);
+  if (el.showEchoRequestToggle) el.showEchoRequestToggle.checked = layout.showRequest;
+  if (el.showEchoResponseToggle) el.showEchoResponseToggle.checked = layout.showResponse;
 }
 
 function selectedEchoTab() {
@@ -3304,7 +3529,7 @@ function createEchoGroup() {
 function renameEchoTab(tabId) {
   const tab = state.echoTabs.find((item) => item.id === tabId);
   if (!tab) return;
-  const next = window.prompt('Rename Echo tab', tab.title || '');
+  const next = window.prompt('Rename Relay tab', tab.title || '');
   if (next === null) return;
   const trimmed = next.trim();
   if (!trimmed) return;
@@ -3317,7 +3542,7 @@ function renameEchoTab(tabId) {
 function renameEchoGroup(groupId) {
   const group = state.echoGroups.find((item) => item.id === groupId);
   if (!group) return;
-  const next = window.prompt('Rename Echo group', group.title || '');
+  const next = window.prompt('Rename Relay group', group.title || '');
   if (next === null) return;
   const trimmed = next.trim();
   if (!trimmed) return;
@@ -3444,13 +3669,13 @@ function moveEchoTab(tabId, targetTabId, targetGroupId) {
 
 function startEchoPaneResize(event) {
   event.preventDefault();
+  if (!state.echoPaneLayout.showRequest || !state.echoPaneLayout.showResponse) return;
   const bounds = el.echoWorkspace.getBoundingClientRect();
 
   const onMove = (moveEvent) => {
     const next = ((moveEvent.clientX - bounds.left) / bounds.width) * 100;
     state.echoSplit = Math.max(25, Math.min(75, Math.round(next)));
-    el.echoWorkspace.style.setProperty('--echo-request-size', `${state.echoSplit}%`);
-    el.echoWorkspace.style.setProperty('--echo-response-size', `${100 - state.echoSplit}%`);
+    renderEchoPaneLayout();
   };
 
   const onUp = () => {
@@ -3479,7 +3704,7 @@ function createBlankEchoTab() {
     url: 'http://example.com/',
     headers: {
       host: 'example.com',
-      'user-agent': 'Veil Echo',
+      'user-agent': 'Veil Relay',
     },
     bodyText: '',
   }, 'Manual request');
@@ -3498,6 +3723,29 @@ async function sendFlowToEcho(flowId) {
   schedulePersistEchoState();
   setView('echo');
   renderEcho();
+}
+
+async function sendFlowToAttack(flowId) {
+  const flow = state.selectedFlow?.id === flowId ? state.selectedFlow : await api(`/api/history/${encodeURIComponent(flowId)}`);
+  userAttacksView?.createFromRequest(flow.request, `${flow.request.method} ${requestTarget(flow.request.url)}`, `From req #${flow.id}`, flow.id);
+}
+
+async function runActiveScan(flowId) {
+  setView('findings');
+  el.findingsSubtitle.textContent = `Active scan running for req #${flowId}...`;
+  const result = await api('/api/scanner/active/run', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      id: flowId,
+      maxRequests: 60,
+      concurrency: 3,
+    }),
+  });
+  await loadFindings();
+  el.findingsSubtitle.textContent = `Active scan finished: ${result.executed} checks, ${result.findings.length} findings`;
 }
 
 function createEchoTab(request, title, source = 'Editable request') {
@@ -3580,6 +3828,71 @@ function flushEchoState() {
   clearTimeout(echoPersistTimer);
   echoPersistTimer = null;
   const payload = JSON.stringify({ echo: serializeEchoState() });
+  if (navigator.sendBeacon) {
+    navigator.sendBeacon('/api/ui-state', new Blob([payload], { type: 'application/json' }));
+    return;
+  }
+  fetch('/api/ui-state', {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: payload,
+    keepalive: true,
+  }).catch(console.error);
+}
+
+function serializeAttackState() {
+  return {
+    tabs: state.attackTabs.map((tab) => ({
+      id: tab.id,
+      title: tab.title || 'Attack',
+      customTitle: Boolean(tab.customTitle),
+      sourceId: tab.sourceId || '',
+      rawRequest: tab.rawRequest || '',
+      insertionPoints: Array.isArray(tab.insertionPoints) ? tab.insertionPoints : [],
+      payloadLists: Array.isArray(tab.payloadLists) ? tab.payloadLists : [],
+      selectedListId: tab.selectedListId || '',
+      mode: tab.mode || 'clusterBomb',
+      concurrency: tab.concurrency || 1,
+      delayMillis: tab.delayMillis || 0,
+      result: tab.result || null,
+      loading: false,
+      error: tab.loading ? null : tab.error || null,
+    })),
+    selectedTabId: state.selectedAttackTabId,
+  };
+}
+
+function schedulePersistAttackState(options = {}) {
+  if (!state.attackPersistenceReady) {
+    return;
+  }
+  if (options.dirty !== false) {
+    markProjectDirty();
+  }
+  clearTimeout(attackPersistTimer);
+  attackPersistTimer = setTimeout(() => {
+    attackPersistTimer = null;
+    persistAttackState().catch(console.error);
+  }, 300);
+}
+
+async function persistAttackState() {
+  await api('/api/ui-state', {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      attacks: serializeAttackState(),
+    }),
+  });
+}
+
+function flushAttackState() {
+  if (!state.attackPersistenceReady) {
+    return;
+  }
+  clearTimeout(attackPersistTimer);
+  attackPersistTimer = null;
+  const payload = JSON.stringify({ attacks: serializeAttackState() });
   if (navigator.sendBeacon) {
     navigator.sendBeacon('/api/ui-state', new Blob([payload], { type: 'application/json' }));
     return;
@@ -3725,6 +4038,12 @@ function openEchoContextMenu(event) {
   state.contextFlowId = target.flowId || target.flowIds?.[0] || null;
   state.echoContextFlowId = target.echoFlowId || null;
   el.sendToEchoContextBtn.disabled = !target.echoFlowId;
+  if (el.sendToAttackContextBtn) {
+    el.sendToAttackContextBtn.disabled = !target.echoFlowId;
+  }
+  if (el.runActiveScanContextBtn) {
+    el.runActiveScanContextBtn.disabled = !target.echoFlowId;
+  }
   el.showFlowsContextBtn.disabled = !target.flowIds?.length;
   el.showFlowsContextBtn.classList.toggle('hidden', !target.flowIds?.length);
   const inConfiguredScope = Boolean(state.config?.scope?.enabled && target.inScope);
@@ -3749,7 +4068,7 @@ function flowContextTarget(source) {
     flowId,
     flowIds: [flowId],
     echoFlowId: source.dataset.echoFlowId || (flow?.type === 'http' ? flowId : null),
-    inScope: Boolean(flow?.inScope),
+    inScope: isFlowInConfiguredScope(flowId, flow),
     scopeRule: scopeUrl ? { field: 'url', operator: 'equals', value: scopeUrl } : null,
   };
 }
@@ -3813,6 +4132,30 @@ function flowSummaryById(flowId) {
     return state.selectedFlow;
   }
   return state.history.find((flow) => flow.id === flowId) || null;
+}
+
+function isFlowInConfiguredScope(flowId, flow = null) {
+  const summary = state.history.find((item) => item.id === flowId) || null;
+  if (typeof summary?.inScope === 'boolean') {
+    return summary.inScope;
+  }
+  if (typeof flow?.inScope === 'boolean') {
+    return flow.inScope;
+  }
+
+  const scope = state.config?.scope || { enabled: false, rules: [] };
+  if (scope.enabled !== true) {
+    return true;
+  }
+  const activeRules = (scope.rules || []).filter((rule) => rule.enabled !== false);
+  if (activeRules.some((rule) => rule.action === 'exclude' && scopeRuleMatchesFlow(rule, flow))) {
+    return false;
+  }
+  const includeRules = activeRules.filter((rule) => rule.action !== 'exclude');
+  if (includeRules.length === 0) {
+    return false;
+  }
+  return includeRules.some((rule) => scopeRuleMatchesFlow(rule, flow));
 }
 
 async function applyScopeFromContext(action) {
@@ -3912,6 +4255,7 @@ function showContextFlows() {
     method: [],
     status: [],
     host: [],
+    source: [],
   };
   state.trafficInScopeOnly = false;
   state.trafficExtensionFilter = { include: '', exclude: '' };
@@ -3929,6 +4273,7 @@ function filteredHistory() {
   return trafficHistory().filter((flow) => {
     if (state.trafficFilters.method.length > 0 && !state.trafficFilters.method.includes(flow.method)) return false;
     if (state.trafficFilters.host.length > 0 && !state.trafficFilters.host.includes(flow.host)) return false;
+    if (state.trafficFilters.source.length > 0 && !state.trafficFilters.source.includes(trafficSourceMeta(flow).key)) return false;
     if (state.trafficInScopeOnly && !flow.inScope) return false;
     if (!matchesExtensionFilter(flow)) return false;
     if (!matchesStatusFilters(flow)) return false;
@@ -3943,7 +4288,9 @@ function matchesTrafficSearch(flow) {
     return flowSearchIds.has(String(flow.id));
   }
 
-  const haystack = `${flow.id} ${flow.method} ${flow.host} ${flow.url} ${flow.statusCode || ''} ${flow.inScope ? 'in scope' : 'out scope'}`.toLowerCase();
+  const source = trafficSourceMeta(flow);
+  const haystack =
+    `${flow.id} ${source.key} ${source.label} ${source.tool} ${flow.method} ${flow.host} ${flow.url} ${flow.statusCode || ''} ${flow.inScope ? 'in scope' : 'out scope'}`.toLowerCase();
   const terms = state.trafficSearch
     .split(',')
     .map((term) => term.trim().toLowerCase())
@@ -3996,6 +4343,64 @@ function isTrafficFlow(flow) {
   return flow && flow.type !== 'connect' && flow.method !== 'CONNECT';
 }
 
+function trafficSourceOptions(flows) {
+  const seen = new Map();
+  for (const flow of flows) {
+    const meta = trafficSourceMeta(flow);
+    if (!seen.has(meta.key)) {
+      seen.set(meta.key, meta.label);
+    }
+  }
+  const order = ['proxy', 'echo', 'attacks', 'scanner', 'mcp', 'tool'];
+  return [...seen.entries()].sort((a, b) => {
+    const ai = order.includes(a[0]) ? order.indexOf(a[0]) : order.length;
+    const bi = order.includes(b[0]) ? order.indexOf(b[0]) : order.length;
+    return ai === bi ? a[1].localeCompare(b[1]) : ai - bi;
+  });
+}
+
+function trafficSourceMeta(flow = {}) {
+  const tool = String(flow.tool || '');
+  const rawSource = String(flow.source || '').trim().toLowerCase();
+  const rawTool = tool.trim().toLowerCase();
+  let key = sanitizeTrafficSourceKey(rawSource || rawTool || 'proxy');
+  if (!rawSource && !rawTool) key = 'proxy';
+  if (rawSource === 'attack' || rawSource === 'payload_attack' || rawSource === 'payload-attack') key = 'attacks';
+  if (rawSource === 'attacks') key = 'attacks';
+  if (rawTool.includes('payload') && rawTool.includes('attack') && rawSource !== 'mcp') key = 'attacks';
+  if (rawTool === 'echo') key = 'echo';
+  if (rawTool.includes('mcp') || rawSource === 'mcp') key = 'mcp';
+  if (!['proxy', 'echo', 'attacks', 'mcp'].includes(key) && !key) key = 'tool';
+  return {
+    key,
+    label: trafficSourceLabel(key),
+    tool: tool || trafficSourceLabel(key),
+    title: tool ? `${trafficSourceLabel(key)} / ${tool}` : trafficSourceLabel(key),
+  };
+}
+
+function sanitizeTrafficSourceKey(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 40);
+}
+
+function trafficSourceLabel(key) {
+  if (key === 'proxy') return 'Proxy';
+  if (key === 'echo') return 'Relay';
+  if (key === 'attacks') return 'Fuzzer';
+  if (key === 'mcp') return 'MCP';
+  return String(key || 'tool')
+    .split(/[-_]+/)
+    .filter(Boolean)
+    .map((part) => `${part.charAt(0).toUpperCase()}${part.slice(1)}`)
+    .join(' ') || 'Tool';
+}
+
 function compareTrafficFlows(a, b) {
   const direction = state.trafficSort.direction === 'asc' ? 1 : -1;
   const key = state.trafficSort.key;
@@ -4009,6 +4414,7 @@ function compareTrafficFlows(a, b) {
 
 function trafficSortValue(flow, key) {
   if (key === 'id') return Number(flow.id) || 0;
+  if (key === 'source') return trafficSourceMeta(flow).label;
   if (key === 'method') return flow.method || '';
   if (key === 'host') return flow.host || '';
   if (key === 'path') return safeUrl(flow.url)?.pathname || flow.path || flow.url || '';
@@ -4948,6 +5354,12 @@ async function saveMcpConfig() {
     el.mcpStatus.textContent = 'MCP port must be between 0 and 65535.';
     return;
   }
+  if (el.mcpEnabledToggle.checked && !hasConfiguredMcpScope()) {
+    el.mcpEnabledToggle.checked = false;
+    el.mcpStatus.textContent = 'Cannot enable MCP: scope is not configured. Add an enabled include rule in Scope first.';
+    el.mcpEndpoint.textContent = 'MCP disabled';
+    return;
+  }
 
   el.mcpStatus.textContent = 'Applying MCP settings...';
   try {
@@ -5200,6 +5612,7 @@ async function syncProjectUiState() {
     body: JSON.stringify({
       echo: serializeEchoState(),
       traffic: serializeTrafficUiState(),
+      attacks: serializeAttackState(),
     }),
   });
 }
@@ -5210,7 +5623,7 @@ function projectSnapshotFilename(payload) {
 }
 
 async function clearHistory() {
-  if (!window.confirm('Clear all captured traffic from this project? Echo tabs and config will stay intact.')) {
+  if (!window.confirm('Clear all captured traffic from this project? Relay tabs and config will stay intact.')) {
     return;
   }
 
@@ -5508,13 +5921,19 @@ function readScopeRuleRow(row, action = row?.dataset.scopeAction || 'include') {
 }
 
 function scopeRuleMatchesFlow(rule, flow) {
-  if (!flow || flow.type === 'connect' || flow.method === 'CONNECT') return false;
+  const method = flow?.method || flow?.request?.method || '';
+  if (!flow || flow.type === 'connect' || method === 'CONNECT') return false;
+  const url = flowUrlForScope(flow);
   let candidate = '';
-  if (rule.field === 'url') candidate = scopeComparableUrl(flow.url);
-  if (rule.field === 'host') candidate = flow.host || safeUrl(flow.url)?.host || '';
-  if (rule.field === 'path') candidate = flow.path || safeUrl(flow.url)?.pathname || '';
-  if (rule.field === 'method') candidate = flow.method || '';
+  if (rule.field === 'url') candidate = scopeComparableUrl(url);
+  if (rule.field === 'host') candidate = flow.host || safeUrl(url)?.host || '';
+  if (rule.field === 'path') candidate = flow.path || safeUrl(url)?.pathname || '';
+  if (rule.field === 'method') candidate = method;
   return matchesScopeCandidate(candidate, rule.operator, rule.value);
+}
+
+function flowUrlForScope(flow) {
+  return flow?.url || flow?.request?.url || '';
 }
 
 function matchesScopeCandidate(candidate, operator, value) {
@@ -5614,24 +6033,27 @@ async function patchConfig(partial) {
 }
 
 function setView(view) {
+  let nextView = view;
+  if (MCP_PANEL_IDS.includes(view)) {
+    setMcpTab(view);
+    nextView = 'mcp';
+  }
   const viewTitles = {
     traffic: 'Traffic',
     search: 'Search',
     siteMap: 'Site Map',
     findings: 'Findings',
-    sentTraffic: 'Sent Traffic',
-    mcpLog: 'MCP Log',
-    payloadAttacks: 'Payload Attacks',
-    secrets: 'Secrets',
+    attacks: 'Fuzzer',
+    mcp: 'MCP',
     scope: 'Scope',
-    echo: 'Echo',
+    echo: 'Relay',
     intercept: 'Intercept',
     settings: 'Settings',
   };
-  document.querySelectorAll('.nav-item').forEach((button) => button.classList.toggle('active', button.dataset.view === view));
+  document.querySelectorAll('.nav-item').forEach((button) => button.classList.toggle('active', button.dataset.view === nextView));
   document.querySelectorAll('.view').forEach((panel) => panel.classList.remove('active'));
-  document.querySelector(`#${view}View`).classList.add('active');
-  el.viewTitle.textContent = viewTitles[view] || view;
+  document.querySelector(`#${nextView}View`)?.classList.add('active');
+  el.viewTitle.textContent = viewTitles[nextView] || nextView;
 }
 
 async function api(url, options) {

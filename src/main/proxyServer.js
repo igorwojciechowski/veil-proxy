@@ -5,6 +5,7 @@ const { EventEmitter } = require('events');
 const { closeIdleTransports, createTunnel, requestViaTransport } = require('./transport');
 const { CertificateAuthority } = require('./certAuthority');
 const { buildFindings } = require('./findings');
+const { loadActiveTemplates, loadPassiveTemplates, runActiveScan } = require('./scanner');
 const {
   decodeBody,
   encodeBodyForClient,
@@ -13,6 +14,9 @@ const {
   objectToRawHeaders,
   shouldKeepBody,
 } = require('./httpMessage');
+
+const SECURITY_SIGNAL =
+  /\b(?:SQLITE_ERROR|SQL\s+syntax|syntax\s+error|ORA-\d{4,5}|ODBC|JDBC|PostgreSQL|MySQL|MariaDB|SQLite|SQL\s+Server|MongoError|SequelizeDatabaseError|PDOException|XPathException|SAXParseException|TemplateSyntaxError|Traceback|stack\s+trace|Exception|Command\s+failed|Permission\s+denied)\b|<script\b|javascript:|onerror\s*=|onload\s*=|alert\s*\(/i;
 
 class ProxyServer extends EventEmitter {
   constructor(config, options = {}) {
@@ -120,6 +124,10 @@ class ProxyServer extends EventEmitter {
         : this.config.rewriteRules || [],
     };
 
+    if (this.config.mcp?.enabled !== true && candidate.mcp?.enabled === true && !hasConfiguredMcpScope(candidate.scope)) {
+      throw new Error('Cannot enable MCP before scope is configured. Add at least one enabled include scope rule first.');
+    }
+
     if (
       Object.prototype.hasOwnProperty.call(nextConfig, 'upstream') ||
       Object.prototype.hasOwnProperty.call(nextConfig, 'upstreams') ||
@@ -179,6 +187,37 @@ class ProxyServer extends EventEmitter {
 
   getFindings() {
     return sortFindings([...this.reportedFindings, ...buildFindings(this.history)]);
+  }
+
+  listScannerTemplates() {
+    const summarize = (template) => ({
+      id: String(template.id || ''),
+      title: String(template.title || template.id || ''),
+      category: String(template.category || ''),
+      severity: String(template.severity || 'information'),
+      confidence: String(template.confidence || 'firm'),
+      insertionPoints: Array.isArray(template.insertionPoints) ? template.insertionPoints.map(String) : [],
+      payloadCount: Array.isArray(template.payloads) ? template.payloads.length : 0,
+    });
+    return {
+      passive: loadPassiveTemplates().map(summarize),
+      active: loadActiveTemplates().map(summarize),
+    };
+  }
+
+  async runActiveScannerFromRequest(payload = {}) {
+    const sourceId = String(payload.id || payload.flowId || payload.sourceId || '');
+    const flow = this.getFlow(sourceId);
+    if (!flow || flow.type !== 'http' || !flow.request) {
+      throw new Error('Captured HTTP request not found.');
+    }
+    return runActiveScan({
+      proxy: this,
+      flow,
+      templateIds: Array.isArray(payload.templateIds) ? payload.templateIds : [],
+      maxRequests: payload.maxRequests,
+      concurrency: payload.concurrency,
+    });
   }
 
   getReportedFindings() {
@@ -360,7 +399,7 @@ class ProxyServer extends EventEmitter {
     return this.listHistory();
   }
 
-  async sendEchoRequest(payload = {}) {
+  async sendEchoRequest(payload = {}, options = {}) {
     const request = sanitizeEchoRequest(payload);
     const targetUrl = new URL(request.url);
     const body = request.bodyBase64 ? Buffer.from(request.bodyBase64, 'base64') : Buffer.from(request.bodyText || '');
@@ -373,6 +412,7 @@ class ProxyServer extends EventEmitter {
     }
 
     const startedAt = Date.now();
+    let result;
     try {
       const upstreamResponse = await requestViaTransport({
         targetUrl,
@@ -385,7 +425,7 @@ class ProxyServer extends EventEmitter {
       });
       const decoded = decodeBody(upstreamResponse.headers, upstreamResponse.body);
       const completedAt = Date.now();
-      return {
+      result = {
         startedAt,
         completedAt,
         durationMs: completedAt - startedAt,
@@ -399,6 +439,9 @@ class ProxyServer extends EventEmitter {
         response: {
           statusCode: upstreamResponse.statusCode,
           statusMessage: upstreamResponse.statusMessage,
+          httpVersion: upstreamResponse.httpVersion || '1.1',
+          protocol: protocolLabel(upstreamResponse.httpVersion || '1.1'),
+          alpnProtocol: normalizeAlpnProtocol(upstreamResponse.alpnProtocol),
           headers: headersArrayToObject(upstreamResponse.rawHeaders),
           bodyBase64: upstreamResponse.body.toString('base64'),
           bodyText: decoded.text,
@@ -409,7 +452,7 @@ class ProxyServer extends EventEmitter {
       };
     } catch (error) {
       const completedAt = Date.now();
-      return {
+      result = {
         startedAt,
         completedAt,
         durationMs: completedAt - startedAt,
@@ -424,6 +467,170 @@ class ProxyServer extends EventEmitter {
         error: error.message,
       };
     }
+
+    if (options && options.recordHistory === true) {
+      const recorded = this.recordToolHistory(result, options);
+      if (recorded) {
+        result.historyFlowId = recorded.id;
+        result.source = recorded.source;
+        result.tool = recorded.tool;
+      }
+    }
+
+    return result;
+  }
+
+  recordToolHistory(sent = {}, options = {}) {
+    if (!sent || !sent.request || !sent.request.url) {
+      return null;
+    }
+
+    const startedAt = Number(sent.startedAt || Date.now());
+    const completedAt = sent.completedAt == null ? Date.now() : Number(sent.completedAt);
+    const responseProtocol = sent.response ? protocolLabel(sent.response.httpVersion || '1.1') : '';
+    const flow = {
+      id: String(this.flowCounter++),
+      type: 'http',
+      source: sanitizeTrafficSource(options.source || options.tool || 'tool'),
+      tool: trimText(options.tool || options.source || 'tool', 80),
+      sourceId: trimText(options.sourceId || '', 160),
+      startedAt,
+      completedAt,
+      durationMs: sent.durationMs == null ? completedAt - startedAt : Number(sent.durationMs),
+      protocol: {
+        client: 'Tool',
+        clientAlpn: '',
+        proxiedAs: 'HTTP/1.1',
+        upstream: responseProtocol,
+        upstreamAlpn: sent.response ? normalizeAlpnProtocol(sent.response.alpnProtocol) : '',
+      },
+      request: {
+        method: sent.request.method,
+        url: sent.request.url,
+        httpVersion: '1.1',
+        protocol: 'Tool',
+        alpnProtocol: '',
+        headers: sent.request.headers || {},
+        bodyBase64: sent.request.bodyBase64 || '',
+        bodyText: sent.request.bodyText || '',
+        bodyTruncated: sent.request.bodyTruncated === true,
+      },
+      response: sent.response
+        ? {
+            statusCode: sent.response.statusCode,
+            statusMessage: sent.response.statusMessage,
+            httpVersion: sent.response.httpVersion || '1.1',
+            protocol: sent.response.protocol || responseProtocol,
+            alpnProtocol: normalizeAlpnProtocol(sent.response.alpnProtocol),
+            headers: sent.response.headers || {},
+            bodyBase64: sent.response.bodyBase64 || '',
+            bodyText: sent.response.bodyText || '',
+            bodyEncoding: sent.response.bodyEncoding || '',
+            bodyTruncated: sent.response.bodyTruncated === true,
+          }
+        : null,
+      error: sent.error || null,
+      notes: uniqueStrings([options.note || '', options.sourceId ? `Source req: ${options.sourceId}` : '']).slice(0, 6),
+    };
+
+    this.addHistory(flow);
+    this.emitHistory(flow);
+    return this.summarizeFlow(flow);
+  }
+
+  async runPayloadAttackFromRequest(payload = {}) {
+    const input = sanitizeManualPayloadAttackInput(payload);
+    const variants = buildManualAttackVariants(input);
+    if (variants.length === 0) {
+      throw new Error('Fuzzer needs at least one generated payload variant.');
+    }
+
+    const attackId = `attack-user-${input.sourceId || 'manual'}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const startedAt = Date.now();
+    const statusCodes = {};
+    const outcomes = [];
+
+    const executeVariant = async (variant, baseline) => {
+      const rawRequest = applyManualAttackVariant(input.rawRequest, variant);
+      let sent = null;
+      let saved = null;
+      try {
+        sent = await this.sendEchoRequest(
+          { rawRequest },
+          {
+            recordHistory: true,
+            source: 'attacks',
+            tool: 'Fuzzer',
+            sourceId: input.sourceId,
+            note: `Fuzzer ${attackId} variant ${variant.index}`,
+          },
+        );
+        saved = this.addSentTraffic(manualAttackSentRecord(input.sourceId, variant.index, sent, 'Fuzzer'));
+      } catch (error) {
+        const now = Date.now();
+        sent = {
+          startedAt: now,
+          completedAt: now,
+          durationMs: 0,
+          request: null,
+          response: null,
+          error: error.message,
+        };
+      }
+      const summary = manualAttackSummary(saved || sent, variant, baseline);
+      if (summary.statusCode) {
+        statusCodes[summary.statusCode] = (statusCodes[summary.statusCode] || 0) + 1;
+      }
+      return summary;
+    };
+
+    const first = await executeVariant(variants[0], null);
+    outcomes.push(first);
+    const baseline = first;
+    const remaining = await runWithConcurrency(variants.slice(1), input.concurrency, async (variant) => {
+      if (input.delayMillis > 0) {
+        await sleep(input.delayMillis);
+      }
+      return executeVariant(variant, baseline);
+    });
+    outcomes.push(...remaining);
+    const results = outcomes.sort((a, b) => a.index - b.index);
+    const completedAt = Date.now();
+    const firstRequest = results.find((item) => item.url || item.method) || {};
+    const record = this.addPayloadAttack({
+      id: attackId,
+      sourceId: input.sourceId,
+      method: firstRequest.method,
+      url: firstRequest.url,
+      insertionPoint: {
+        type: 'marked',
+        mode: input.mode,
+        count: input.insertionPoints.length,
+        insertionPoints: input.insertionPoints.map((point) => ({
+          id: point.id,
+          name: point.name,
+          listId: point.listId,
+        })),
+      },
+      startedAt,
+      completedAt,
+      durationMs: completedAt - startedAt,
+      requestedPayloads: variants.length,
+      executed: results.length,
+      sent: results.filter((item) => !item.error).length,
+      errors: results.filter((item) => item.error).length,
+      interesting: results.filter((item) => item.interesting).length,
+      reflectedCount: results.filter((item) => item.payloadReflected).length,
+      securitySignalCount: results.filter((item) => item.securitySignal).length,
+      concurrency: input.concurrency,
+      delayMillis: input.delayMillis,
+      statusCodes,
+      results,
+      details: [],
+      detailsTruncated: false,
+      secretAliasesUsed: [],
+    });
+    return record;
   }
 
   listPending() {
@@ -837,6 +1044,9 @@ class ProxyServer extends EventEmitter {
     return {
       id: flow.id,
       type: flow.type,
+      source: sanitizeTrafficSource(flow.source || (flow.tool ? 'tool' : 'proxy')),
+      tool: trimText(flow.tool || trafficSourceLabel(flow.source || 'proxy'), 80),
+      sourceId: trimText(flow.sourceId || '', 160),
       startedAt: flow.startedAt,
       completedAt: flow.completedAt,
       durationMs: flow.durationMs,
@@ -1004,6 +1214,31 @@ function normalizeAlpnProtocol(value) {
   return value && value !== false ? String(value) : '';
 }
 
+function sanitizeTrafficSource(value) {
+  const source = String(value || 'proxy')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, '-')
+    .replace(/-+/g, '-')
+    .slice(0, 40);
+  if (!source || source === 'tool') return 'tool';
+  if (source === 'attack' || source === 'payload-attack') return 'attacks';
+  return source;
+}
+
+function trafficSourceLabel(source) {
+  const normalized = sanitizeTrafficSource(source);
+  if (normalized === 'proxy') return 'Proxy';
+  if (normalized === 'echo') return 'Relay';
+  if (normalized === 'attacks') return 'Fuzzer';
+  if (normalized === 'mcp') return 'MCP';
+  return normalized
+    .split(/[-_]+/)
+    .filter(Boolean)
+    .map((part) => `${part.charAt(0).toUpperCase()}${part.slice(1)}`)
+    .join(' ') || 'Tool';
+}
+
 function protocolSummaryFromFlow(flow) {
   return {
     client: flow?.request?.protocol || protocolLabel(flow?.request?.httpVersion),
@@ -1031,7 +1266,7 @@ function sanitizeEchoRequestParts(raw) {
     .slice(0, 24);
   const url = String(raw.url || '').trim();
   if (!/^https?:\/\//i.test(url)) {
-    throw new Error('Echo request URL must be absolute and use http or https.');
+    throw new Error('Relay request URL must be absolute and use http or https.');
   }
 
   const headers = raw.headers && typeof raw.headers === 'object' ? raw.headers : {};
@@ -1175,7 +1410,7 @@ function parseRawEchoRequest(rawRequest) {
   const [method, target] = requestLine.trim().split(/\s+/);
 
   if (!method || !target) {
-    throw new Error('Echo raw request must start with an HTTP request line.');
+    throw new Error('Relay raw request must start with an HTTP request line.');
   }
 
   const headers = {};
@@ -1197,7 +1432,7 @@ function parseRawEchoRequest(rawRequest) {
     url = `http:${target}`;
   } else if (!/^https?:\/\//i.test(target)) {
     if (!host) {
-      throw new Error('Echo raw request with relative target requires a Host header.');
+      throw new Error('Relay raw request with relative target requires a Host header.');
     }
     url = `http://${host}${target.startsWith('/') ? target : `/${target}`}`;
   }
@@ -1294,6 +1529,14 @@ function sanitizeMcp(mcp) {
     activeTesting: raw.activeTesting === true,
     anonymization: sanitizeMcpAnonymization(raw.anonymization),
   };
+}
+
+function hasConfiguredMcpScope(scope) {
+  const normalized = sanitizeScope(scope);
+  if (!normalized.enabled) {
+    return false;
+  }
+  return normalized.rules.some((rule) => rule.enabled !== false && rule.action === 'include' && String(rule.value || '').trim());
 }
 
 function sanitizeMcpAnonymization(value) {
@@ -1761,6 +2004,10 @@ function buildReportedFinding(input, flow) {
   const now = Date.now();
   const parts = safeUrlParts(input.url || flow?.request?.url || '');
   const sourceId = String(input.sourceId || flow?.id || '');
+  const flowIds = uniqueStrings([
+    ...(Array.isArray(input.flowIds) ? input.flowIds : []),
+    sourceId,
+  ]);
   const title = trimText(input.title || input.name || 'Reported issue', 160) || 'Reported issue';
   const detail = trimText(input.detail || input.description || '', 4000);
   const remediation = trimText(input.remediation || '', 2000);
@@ -1772,7 +2019,7 @@ function buildReportedFinding(input, flow) {
 
   return {
     id: trimText(input.id, 240) || `mcp:${sourceId || 'sent'}:${slug(title)}:${now}`,
-    source: 'mcp',
+    source: trimText(input.source || 'mcp', 40),
     evidenceSource: input.evidenceSource || 'proxy_history',
     reporter: trimText(input.reporter || 'Codex', 80),
     category: trimText(input.category || '', 80),
@@ -1787,7 +2034,7 @@ function buildReportedFinding(input, flow) {
     method: trimText(input.method || flow?.request?.method || '', 24).toUpperCase(),
     statusCode: input.statusCode == null ? flow?.response?.statusCode || null : Number(input.statusCode),
     count: 1,
-    flowIds: sourceId ? [sourceId] : [],
+    flowIds,
     evidence: evidence.slice(0, 12),
     firstSeenAt: Number(input.firstSeenAt || flow?.startedAt || now),
     lastSeenAt: Number(input.lastSeenAt || now),
@@ -1877,6 +2124,194 @@ function sentBodyBytes(message) {
     return Math.max(0, Math.floor((base64.length * 3) / 4) - padding);
   }
   return Buffer.byteLength(message.bodyText || '', 'utf8');
+}
+
+function sanitizeManualPayloadAttackInput(payload) {
+  const raw = payload && typeof payload === 'object' ? payload : {};
+  const rawRequest = String(raw.rawRequest || '');
+  if (!rawRequest.trim()) {
+    throw new Error('Fuzzer requires a raw request.');
+  }
+  const lists = Array.isArray(raw.payloadLists)
+    ? raw.payloadLists
+        .map((list, index) => {
+          const listId = sanitizeMarkerId(list?.id || `list-${index + 1}`);
+          const items = Array.isArray(list?.items)
+            ? list.items.map((item) => String(item)).filter((item) => item.length > 0).slice(0, 1000)
+            : [];
+          if (!listId || items.length === 0) return null;
+          return {
+            id: listId,
+            name: trimText(list.name || listId, 120),
+            items,
+          };
+        })
+        .filter(Boolean)
+    : [];
+  const listIds = new Set(lists.map((list) => list.id));
+  const insertionPoints = Array.isArray(raw.insertionPoints)
+    ? raw.insertionPoints
+        .map((point, index) => {
+          const id = sanitizeMarkerId(point?.id || `p${index + 1}`);
+          const listId = sanitizeMarkerId(point?.listId || lists[0]?.id || '');
+          if (!id || !listIds.has(listId)) return null;
+          return {
+            id,
+            name: trimText(point.name || id, 80),
+            listId,
+          };
+        })
+        .filter(Boolean)
+        .slice(0, 12)
+    : [];
+  if (insertionPoints.length === 0) {
+    throw new Error('Fuzzer requires at least one insertion point.');
+  }
+  for (const point of insertionPoints) {
+    if (!rawRequest.includes(markerToken(point.id))) {
+      throw new Error(`Raw request is missing insertion marker ${markerToken(point.id)}.`);
+    }
+  }
+  return {
+    sourceId: trimText(raw.sourceId || '', 160),
+    rawRequest,
+    insertionPoints,
+    payloadLists: lists,
+    mode: ['clusterBomb', 'pitchfork'].includes(raw.mode) ? raw.mode : 'clusterBomb',
+    concurrency: clampNumber(raw.concurrency, 1, 10, 1),
+    delayMillis: clampNumber(raw.delayMillis, 0, 5000, 0),
+  };
+}
+
+function buildManualAttackVariants(input) {
+  const lists = new Map(input.payloadLists.map((list) => [list.id, list.items]));
+  const points = input.insertionPoints;
+  const maxVariants = 200;
+  if (input.mode === 'pitchfork') {
+    const length = Math.min(...points.map((point) => lists.get(point.listId)?.length || 0));
+    return Array.from({ length: Math.min(length, maxVariants) }, (_, index) => ({
+      index,
+      payloads: Object.fromEntries(points.map((point) => [point.id, lists.get(point.listId)[index]])),
+    }));
+  }
+
+  const variants = [];
+  const walk = (pointIndex, payloads) => {
+    if (variants.length >= maxVariants) return;
+    if (pointIndex >= points.length) {
+      variants.push({ index: variants.length, payloads: { ...payloads } });
+      return;
+    }
+    const point = points[pointIndex];
+    for (const payload of lists.get(point.listId) || []) {
+      payloads[point.id] = payload;
+      walk(pointIndex + 1, payloads);
+      if (variants.length >= maxVariants) break;
+    }
+  };
+  walk(0, {});
+  return variants;
+}
+
+function applyManualAttackVariant(rawRequest, variant) {
+  let output = rawRequest;
+  for (const [pointId, payload] of Object.entries(variant.payloads || {})) {
+    output = output.split(markerToken(pointId)).join(String(payload));
+  }
+  return output;
+}
+
+function manualAttackSentRecord(sourceId, index, sent, note) {
+  return {
+    id: `sent-${String(sourceId || 'manual')}-user-attack-${index}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    sourceId: String(sourceId || ''),
+    tool: 'payload_attack',
+    type: 'http',
+    startedAt: sent.startedAt,
+    completedAt: sent.completedAt,
+    durationMs: sent.durationMs,
+    request: sent.request,
+    response: sent.response,
+    error: sent.error,
+    notes: [note],
+  };
+}
+
+function manualAttackSummary(record, variant, baseline) {
+  const responseText = record.response?.bodyText || '';
+  const headers = headersToComparableText(record.response?.headers);
+  const responseBytes = record.response ? Buffer.byteLength(record.response.bodyBase64 || '', 'base64') : 0;
+  const requestBytes = record.request ? Buffer.byteLength(record.request.bodyBase64 || '', 'base64') : 0;
+  const payloadValues = Object.values(variant.payloads || {}).map(String);
+  const reflected = payloadValues.some((payload) => payload && (responseText.includes(payload) || headers.includes(payload)));
+  const securitySignal = SECURITY_SIGNAL.test(responseText);
+  const statusCode = record.response?.statusCode || null;
+  const delta = baseline ? responseBytes - baseline.responseBytes : 0;
+  const statusChanged = baseline ? statusCode !== baseline.statusCode : false;
+  return {
+    index: variant.index,
+    sentTrafficId: record.id || '',
+    payloadPreview: Object.entries(variant.payloads || {})
+      .map(([point, payload]) => `${point}=${String(payload).slice(0, 80)}`)
+      .join(', '),
+    method: record.request?.method || '',
+    url: record.request?.url || '',
+    statusCode,
+    durationMs: record.durationMs,
+    requestBytes,
+    responseBytes,
+    responseBytesDelta: delta,
+    statusChanged,
+    payloadReflected: reflected,
+    securitySignal,
+    interesting:
+      variant.index === 0 ||
+      Boolean(record.error) ||
+      reflected ||
+      securitySignal ||
+      statusChanged ||
+      Math.abs(delta) > Math.max(128, Math.round((baseline?.responseBytes || 0) * 0.15)),
+    title: '',
+    error: record.error || null,
+  };
+}
+
+function sanitizeMarkerId(value) {
+  return String(value || '')
+    .trim()
+    .replace(/[^a-z0-9_-]/gi, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40);
+}
+
+function markerToken(id) {
+  return `§${id}§`;
+}
+
+function headersToComparableText(headers) {
+  return Object.entries(headers || {})
+    .map(([name, value]) => `${name}: ${Array.isArray(value) ? value.join(', ') : value}`)
+    .join('\n');
+}
+
+async function runWithConcurrency(items, concurrency, worker) {
+  const results = new Array(items.length);
+  let next = 0;
+  const count = Math.max(1, Math.min(Number(concurrency) || 1, items.length || 1));
+  await Promise.all(
+    Array.from({ length: count }, async () => {
+      while (next < items.length) {
+        const index = next;
+        next += 1;
+        results[index] = await worker(items[index], index);
+      }
+    }),
+  );
+  return results.filter(Boolean);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function sanitizePayloadAttacks(value) {

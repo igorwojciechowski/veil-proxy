@@ -12,7 +12,7 @@ class ApiServer {
     this.publicDir = publicDir;
     this.port = port;
     this.clients = new Set();
-    this.memoryUiState = { echo: defaultEchoUiState(), traffic: defaultTrafficUiState() };
+    this.memoryUiState = { echo: defaultEchoUiState(), traffic: defaultTrafficUiState(), attacks: defaultAttacksUiState() };
     this.server = http.createServer(this.handleRequest.bind(this));
 
     if (this.mcp && typeof this.mcp.setUiStateAccess === 'function') {
@@ -25,11 +25,15 @@ class ApiServer {
           if (nextUi && Object.prototype.hasOwnProperty.call(nextUi, 'traffic')) {
             this.setUiState('traffic', sanitizeTrafficUiState(nextUi.traffic));
           }
+          if (nextUi && Object.prototype.hasOwnProperty.call(nextUi, 'attacks')) {
+            this.setUiState('attacks', sanitizeAttacksUiState(nextUi.attacks));
+          }
           const uiState = this.getUiState();
           this.broadcast('ui', {
             ...uiState,
             forceEcho: nextUi && Object.prototype.hasOwnProperty.call(nextUi, 'echo'),
             forceTraffic: nextUi && Object.prototype.hasOwnProperty.call(nextUi, 'traffic'),
+            forceAttacks: nextUi && Object.prototype.hasOwnProperty.call(nextUi, 'attacks'),
           });
           return uiState;
         },
@@ -213,6 +217,9 @@ class ApiServer {
         if (body && Object.prototype.hasOwnProperty.call(body, 'traffic')) {
           this.setUiState('traffic', sanitizeTrafficUiState(body.traffic));
         }
+        if (body && Object.prototype.hasOwnProperty.call(body, 'attacks')) {
+          this.setUiState('attacks', sanitizeAttacksUiState(body.attacks));
+        }
         const uiState = this.getUiState();
         this.broadcast('ui', uiState);
         this.json(res, uiState);
@@ -239,6 +246,17 @@ class ApiServer {
 
       if (parsed.pathname === '/api/findings' && req.method === 'GET') {
         this.json(res, this.proxy.getFindings());
+        return;
+      }
+
+      if (parsed.pathname === '/api/scanner/templates' && req.method === 'GET') {
+        this.json(res, this.proxy.listScannerTemplates ? this.proxy.listScannerTemplates() : { passive: [], active: [] });
+        return;
+      }
+
+      if (parsed.pathname === '/api/scanner/active/run' && req.method === 'POST') {
+        const body = await readJson(req);
+        this.json(res, await this.proxy.runActiveScannerFromRequest(body));
         return;
       }
 
@@ -270,6 +288,12 @@ class ApiServer {
 
       if (parsed.pathname === '/api/payload-attacks' && req.method === 'DELETE') {
         this.json(res, this.proxy.clearPayloadAttacks ? this.proxy.clearPayloadAttacks() : []);
+        return;
+      }
+
+      if (parsed.pathname === '/api/payload-attacks/run' && req.method === 'POST') {
+        const body = await readJson(req);
+        this.json(res, await this.proxy.runPayloadAttackFromRequest(body));
         return;
       }
 
@@ -325,7 +349,16 @@ class ApiServer {
 
       if (parsed.pathname === '/api/echo/send' && req.method === 'POST') {
         const body = await readJson(req);
-        this.json(res, await this.proxy.sendEchoRequest(body));
+        this.json(
+          res,
+          await this.proxy.sendEchoRequest(body, {
+            recordHistory: true,
+            source: 'echo',
+            tool: 'Relay',
+            sourceId: body?.sourceId || '',
+            note: 'Sent from Relay',
+          }),
+        );
         return;
       }
 
@@ -405,6 +438,7 @@ class ApiServer {
     return {
       echo: this.readUiState('echo', defaultEchoUiState()),
       traffic: this.readUiState('traffic', defaultTrafficUiState()),
+      attacks: this.readUiState('attacks', defaultAttacksUiState()),
     };
   }
 
@@ -457,6 +491,12 @@ class ApiServer {
       apiHost: currentConfig.apiHost,
       apiPort: currentConfig.apiPort,
     };
+    if (nextConfig.mcp?.enabled === true && !hasConfiguredMcpScope(nextConfig.scope)) {
+      nextConfig.mcp = {
+        ...nextConfig.mcp,
+        enabled: false,
+      };
+    }
 
     await this.proxy.updateConfig(nextConfig);
     if (this.mcp) {
@@ -480,6 +520,7 @@ class ApiServer {
     this.memoryUiState = {
       echo: sanitizeEchoUiState(nextUi.echo),
       traffic: sanitizeTrafficUiState(nextUi.traffic),
+      attacks: sanitizeAttacksUiState(nextUi.attacks),
     };
 
     if (this.store) {
@@ -514,6 +555,7 @@ class ApiServer {
     this.memoryUiState = {
       echo: defaultEchoUiState(),
       traffic: defaultTrafficUiState(),
+      attacks: defaultAttacksUiState(),
     };
 
     if (this.store) {
@@ -793,13 +835,13 @@ function attackFindingTitle(result, attack) {
   if (result.payloadReflected) return 'Payload reflected in response';
   if (result.statusChanged) return 'Payload changed response status';
   if (result.error) return 'Payload request produced an error';
-  return 'Interesting payload attack result';
+  return 'Interesting fuzzer result';
 }
 
 function attackFindingDetail(result, attack) {
   const signals = attackResultSignals(result);
   return [
-    `Payload attack ${attack.id} produced an interesting result against ${attack.method || '-'} ${attack.url || '-'}.`,
+    `Fuzzer run ${attack.id} produced an interesting result against ${attack.method || '-'} ${attack.url || '-'}.`,
     `Payload index: ${result.index}.`,
     `Payload preview: ${result.payloadPreview || '-'}.`,
     `Status: ${result.error ? 'ERR' : result.statusCode || '-'}.`,
@@ -813,7 +855,7 @@ function attackFindingCategory(result) {
   if (result.securitySignal) return 'Injection';
   if (result.payloadReflected) return 'Reflection';
   if (result.statusChanged) return 'Behavior Change';
-  return 'Payload Attack';
+  return 'Fuzzer';
 }
 
 function attackFindingSeverity(result) {
@@ -874,12 +916,22 @@ function defaultTrafficUiState() {
   };
 }
 
+function defaultAttacksUiState() {
+  return {
+    tabs: [],
+    selectedTabId: null,
+  };
+}
+
 function sanitizeUiState(name, value) {
   if (name === 'echo') {
     return sanitizeEchoUiState(value);
   }
   if (name === 'traffic') {
     return sanitizeTrafficUiState(value);
+  }
+  if (name === 'attacks') {
+    return sanitizeAttacksUiState(value);
   }
   return value && typeof value === 'object' ? value : {};
 }
@@ -888,6 +940,53 @@ function sanitizeTrafficUiState(value) {
   const raw = value && typeof value === 'object' ? value : {};
   const presets = Array.isArray(raw.presets) ? raw.presets.slice(0, 80).map(sanitizeTrafficPreset).filter(Boolean) : [];
   return { presets };
+}
+
+function sanitizeAttacksUiState(value) {
+  const raw = value && typeof value === 'object' ? value : {};
+  const tabs = Array.isArray(raw.tabs) ? raw.tabs.slice(0, 100).map(sanitizeAttackTab).filter(Boolean) : [];
+  const selectedTabId = tabs.some((tab) => tab.id === raw.selectedTabId) ? raw.selectedTabId : tabs[0]?.id || null;
+  return { tabs, selectedTabId };
+}
+
+function sanitizeAttackTab(tab) {
+  if (!tab || typeof tab !== 'object') return null;
+  const id = sanitizeId(tab.id);
+  if (!id) return null;
+  const payloadLists = Array.isArray(tab.payloadLists)
+    ? tab.payloadLists
+        .slice(0, 20)
+        .map((list, index) => ({
+          id: sanitizeId(list?.id) || `list-${index + 1}`,
+          name: trimText(list?.name || `List ${index + 1}`, 120),
+          items: sanitizeStringList(list?.items, 1000, 4000),
+        }))
+        .filter((list) => list.items.length > 0)
+    : [];
+  return {
+    id,
+    title: trimText(tab.title || 'Attack', 160),
+    customTitle: Boolean(tab.customTitle),
+    sourceId: trimText(tab.sourceId || '', 160),
+    rawRequest: typeof tab.rawRequest === 'string' ? tab.rawRequest : '',
+    insertionPoints: Array.isArray(tab.insertionPoints)
+      ? tab.insertionPoints
+          .slice(0, 12)
+          .map((point, index) => ({
+            id: sanitizeId(point?.id) || `p${index + 1}`,
+            name: trimText(point?.name || `p${index + 1}`, 80),
+            listId: sanitizeId(point?.listId) || payloadLists[0]?.id || '',
+          }))
+      : [],
+    payloadLists,
+    selectedListId: sanitizeId(tab.selectedListId) || payloadLists[0]?.id || '',
+    mode: ['clusterBomb', 'pitchfork'].includes(tab.mode) ? tab.mode : 'clusterBomb',
+    concurrency: clampNumber(tab.concurrency, 1, 10, 1),
+    delayMillis: clampNumber(tab.delayMillis, 0, 5000, 0),
+    result: tab.result && typeof tab.result === 'object' ? tab.result : null,
+    loading: false,
+    error: typeof tab.error === 'string' ? trimText(tab.error, 2000) : null,
+  };
 }
 
 function sanitizeTrafficPreset(preset) {
@@ -993,6 +1092,19 @@ function sanitizeId(value) {
 function sanitizeColor(value) {
   const color = String(value || '').trim();
   return ['cyan', 'pink', 'amber', 'violet', 'green', 'red'].includes(color) ? color : '';
+}
+
+function hasConfiguredMcpScope(scope) {
+  const raw = scope && typeof scope === 'object' ? scope : {};
+  if (raw.enabled !== true || !Array.isArray(raw.rules)) return false;
+  return raw.rules.some(
+    (rule) =>
+      rule &&
+      typeof rule === 'object' &&
+      rule.enabled !== false &&
+      rule.action !== 'exclude' &&
+      String(rule.value || '').trim(),
+  );
 }
 
 function trimText(value, maxLength) {

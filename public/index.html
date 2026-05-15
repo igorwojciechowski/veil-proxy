@@ -17,55 +17,62 @@
           </div>
         </div>
 
-        <nav class="nav">
-          <button class="nav-item active" type="button" data-view="traffic" title="Traffic">
-            <span class="nav-icon">⇄</span>
-            <span>Traffic</span>
-          </button>
-          <button class="nav-item" type="button" data-view="search" title="Search">
-            <span class="nav-icon">⌕</span>
-            <span>Search</span>
-          </button>
-          <button class="nav-item" type="button" data-view="siteMap" title="Site Map">
-            <span class="nav-icon">☷</span>
-            <span>Site Map</span>
-          </button>
-          <button class="nav-item" type="button" data-view="findings" title="Findings">
-            <span class="nav-icon">!</span>
-            <span>Findings</span>
-          </button>
-          <button class="nav-item" type="button" data-view="sentTraffic" title="Sent Traffic">
-            <span class="nav-icon">⇢</span>
-            <span>Sent</span>
-          </button>
-          <button class="nav-item" type="button" data-view="mcpLog" title="MCP Log">
-            <span class="nav-icon">◇</span>
-            <span>MCP Log</span>
-          </button>
-          <button class="nav-item" type="button" data-view="payloadAttacks" title="Payload Attacks">
-            <span class="nav-icon">⌁</span>
-            <span>Attacks</span>
-          </button>
-          <button class="nav-item" type="button" data-view="secrets" title="Secrets">
-            <span class="nav-icon">◆</span>
-            <span>Secrets</span>
-          </button>
-          <button class="nav-item" type="button" data-view="scope" title="Scope">
-            <span class="nav-icon">◎</span>
-            <span>Scope</span>
-          </button>
-          <button class="nav-item" type="button" data-view="echo" title="Echo">
-            <span class="nav-icon">↻</span>
-            <span>Echo</span>
-          </button>
-          <button class="nav-item" type="button" data-view="intercept" title="Intercept">
-            <span class="nav-icon">⏸</span>
-            <span>Intercept</span>
-          </button>
-          <button class="nav-item" type="button" data-view="settings" title="Settings">
-            <span class="nav-icon">⚙</span>
-            <span>Settings</span>
-          </button>
+        <nav class="nav" aria-label="Primary">
+          <section class="nav-group" aria-labelledby="nav-capture">
+            <div id="nav-capture" class="nav-group-label">Capture</div>
+            <button class="nav-item active" type="button" data-view="traffic" title="Traffic">
+              <span class="nav-icon">⇄</span>
+              <span>Traffic</span>
+            </button>
+            <button class="nav-item" type="button" data-view="intercept" title="Intercept">
+              <span class="nav-icon">⏸</span>
+              <span>Intercept</span>
+            </button>
+          </section>
+
+          <section class="nav-group" aria-labelledby="nav-analysis">
+            <div id="nav-analysis" class="nav-group-label">Analysis</div>
+            <button class="nav-item" type="button" data-view="search" title="Search">
+              <span class="nav-icon">⌕</span>
+              <span>Search</span>
+            </button>
+            <button class="nav-item" type="button" data-view="siteMap" title="Site Map">
+              <span class="nav-icon">☷</span>
+              <span>Site Map</span>
+            </button>
+            <button class="nav-item" type="button" data-view="findings" title="Findings">
+              <span class="nav-icon">!</span>
+              <span>Findings</span>
+            </button>
+            <button class="nav-item" type="button" data-view="scope" title="Scope">
+              <span class="nav-icon">◎</span>
+              <span>Scope</span>
+            </button>
+          </section>
+
+          <section class="nav-group" aria-labelledby="nav-tools">
+            <div id="nav-tools" class="nav-group-label">Tools</div>
+            <button class="nav-item" type="button" data-view="echo" title="Relay">
+              <span class="nav-icon">↻</span>
+              <span>Relay</span>
+            </button>
+            <button class="nav-item" type="button" data-view="attacks" title="Fuzzer">
+              <span class="nav-icon">⌁</span>
+              <span>Fuzzer</span>
+            </button>
+            <button class="nav-item" type="button" data-view="mcp" title="MCP">
+              <span class="nav-icon">◇</span>
+              <span>MCP</span>
+            </button>
+          </section>
+
+          <section class="nav-group" aria-labelledby="nav-system">
+            <div id="nav-system" class="nav-group-label">System</div>
+            <button class="nav-item" type="button" data-view="settings" title="Settings">
+              <span class="nav-icon">⚙</span>
+              <span>Settings</span>
+            </button>
+          </section>
         </nav>
 
         <div class="proxy-chip">
@@ -126,7 +133,7 @@
               <div class="traffic-filter-bar">
                 <label class="traffic-search-label">
                   Search
-                  <input id="trafficSearch" class="search-input" type="search" placeholder="ID, host, path, method, status" />
+                  <input id="trafficSearch" class="search-input" type="search" placeholder="ID, source, host, path, method, status" />
                 </label>
                 <div class="traffic-filter-group">
                   Method
@@ -135,6 +142,10 @@
                 <div class="traffic-filter-group">
                   Status
                   <div id="trafficStatusFilter" class="checkbox-filter-list"></div>
+                </div>
+                <div class="traffic-filter-group">
+                  Source
+                  <div id="trafficSourceFilter" class="checkbox-filter-list"></div>
                 </div>
                 <div class="traffic-filter-group traffic-scope-filter">
                   <div id="trafficScopeFilter" class="checkbox-filter-list"></div>
@@ -175,6 +186,7 @@
                   <thead>
                     <tr>
                       <th><button class="table-sort" type="button" data-sort-key="id">ID</button></th>
+                      <th><button class="table-sort" type="button" data-sort-key="source">Source</button></th>
                       <th><button class="table-sort" type="button" data-sort-key="method">Method</button></th>
                       <th><button class="table-sort" type="button" data-sort-key="host">Host</button></th>
                       <th><button class="table-sort" type="button" data-sort-key="path">Path</button></th>
@@ -321,13 +333,141 @@
           </div>
         </section>
 
+        <section id="mcpView" class="view">
+          <div class="mcp-workspace">
+            <div class="mcp-tabbar" role="tablist" aria-label="MCP workspace">
+              <button class="mcp-tab active" type="button" data-mcp-tab="sentTraffic" role="tab">Issued</button>
+              <button class="mcp-tab" type="button" data-mcp-tab="mcpLog" role="tab">Audit</button>
+              <button class="mcp-tab" type="button" data-mcp-tab="payloadAttacks" role="tab">Fuzzer</button>
+              <button class="mcp-tab" type="button" data-mcp-tab="secrets" role="tab">Secrets</button>
+              <button class="mcp-tab" type="button" data-mcp-tab="mcpConfig" role="tab">Config</button>
+            </div>
+            <div id="mcpPanels" class="mcp-panels"></div>
+          </div>
+        </section>
+
+        <section id="attacksView" class="view">
+          <div class="attack-tool-layout">
+            <section class="panel attack-tool-panel">
+              <div class="attack-tabs-bar">
+                <div id="attackTabs" class="attack-tabs"></div>
+                <button id="newAttackTabBtn" class="button ghost compact-button" type="button">+ Tab</button>
+              </div>
+              <div id="attackPaneToolbar" class="split-pane-toolbar hidden">
+                <label class="inline-check">
+                  <input id="showAttackRequestToggle" type="checkbox" checked />
+                  <span>Request</span>
+                </label>
+                <label class="inline-check">
+                  <input id="showAttackPayloadToggle" type="checkbox" checked />
+                  <span>Payloads</span>
+                </label>
+              </div>
+              <div id="emptyAttackTool" class="empty-state">Send a request from Traffic or create a new fuzzer tab</div>
+              <div id="attackWorkspace" class="attack-workspace hidden">
+                <section class="attack-request-pane">
+                  <div class="panel-title-row">
+                    <div>
+                      <h2>Request</h2>
+                      <div id="attackRequestSubtitle" class="panel-subtitle">Mark at least one insertion point</div>
+                    </div>
+                    <div class="button-row">
+                      <button id="markAttackSelectionBtn" class="button ghost compact-button" type="button">Mark selection</button>
+                      <button id="clearAttackPointsBtn" class="button ghost compact-button" type="button">Clear points</button>
+                      <button id="runAttackBtn" class="button primary" type="button">Run</button>
+                    </div>
+                  </div>
+                  <div class="echo-tab-meta">
+                    <label>
+                      Name
+                      <input id="attackTabName" type="text" autocomplete="off" />
+                    </label>
+                  </div>
+                  <div class="raw-toolbar">
+                    <span>Raw request</span>
+                    <button class="button ghost copy-button" type="button" data-copy-target="attackRawRequest">Copy</button>
+                  </div>
+                  <div class="raw-editor-wrap attack-raw-editor">
+                    <pre id="attackRawRequestHighlight" class="raw-code http-code raw-editor-highlight line-numbered" aria-hidden="true"></pre>
+                    <textarea id="attackRawRequest" class="raw-editor-input" spellcheck="false" autocomplete="off" wrap="soft"></textarea>
+                  </div>
+                  <div class="attack-point-panel">
+                    <div class="panel-subtitle">Insertion points</div>
+                    <div id="attackPointRows" class="attack-point-rows"></div>
+                  </div>
+                </section>
+
+                <div id="attackPaneResizer" class="attack-pane-resizer" role="separator" aria-label="Resize Fuzzer panes"></div>
+
+                <section class="attack-payload-pane">
+                  <div class="panel-title-row">
+                    <div>
+                      <h2>Payloads</h2>
+                      <div id="attackStatus" class="panel-subtitle">Ready</div>
+                    </div>
+                    <div class="button-row">
+                      <button id="newAttackListBtn" class="button ghost compact-button" type="button">+ List</button>
+                      <button id="deleteAttackListBtn" class="button ghost compact-button" type="button">Delete List</button>
+                    </div>
+                  </div>
+                  <div class="attack-options-grid">
+                    <label>
+                      Payload list
+                      <select id="attackListSelect"></select>
+                    </label>
+                    <label>
+                      List name
+                      <input id="attackListName" type="text" autocomplete="off" />
+                    </label>
+                    <label>
+                      Mode
+                      <select id="attackMode">
+                        <option value="clusterBomb">Cluster bomb</option>
+                        <option value="pitchfork">Pitchfork</option>
+                      </select>
+                    </label>
+                    <label>
+                      Concurrency
+                      <input id="attackConcurrency" type="number" min="1" max="10" step="1" />
+                    </label>
+                    <label>
+                      Delay ms
+                      <input id="attackDelay" type="number" min="0" max="5000" step="50" />
+                    </label>
+                    <label class="attack-file-label">
+                      Import txt
+                      <input id="attackListFile" type="file" accept=".txt,text/plain" />
+                    </label>
+                  </div>
+                  <textarea id="attackPayloadText" class="attack-payload-text" spellcheck="false" placeholder="one payload per line"></textarea>
+                  <div class="table-wrap attack-results-wrap">
+                    <table class="traffic-table attack-results-table">
+                      <thead>
+                        <tr>
+                          <th>#</th>
+                          <th>Payloads</th>
+                          <th>Status</th>
+                          <th>Size Δ</th>
+                          <th>Time</th>
+                          <th>Signals</th>
+                        </tr>
+                      </thead>
+                      <tbody id="attackResultRows"></tbody>
+                    </table>
+                  </div>
+                </section>
+              </div>
+            </section>
+          </div>
+        </section>
+
         <section id="sentTrafficView" class="view">
           <div class="sent-traffic-layout">
             <section class="panel sent-traffic-panel">
               <div class="panel-toolbar">
                 <div>
-                  <h2>Sent traffic</h2>
-                  <div id="sentTrafficSubtitle" class="panel-subtitle">0 requests sent by MCP</div>
+                  <h2>Issued HTTP</h2>
+                  <div id="sentTrafficSubtitle" class="panel-subtitle">0 requests issued by MCP</div>
                 </div>
                 <button id="clearSentTrafficBtn" class="button ghost compact-button" type="button">Clear</button>
               </div>
@@ -351,7 +491,7 @@
             </section>
 
             <section class="panel sent-traffic-detail-panel">
-              <div id="emptySentTrafficDetail" class="empty-state">Select sent traffic</div>
+              <div id="emptySentTrafficDetail" class="empty-state">Select issued request</div>
               <div id="sentTrafficDetail" class="detail-content hidden">
                 <div class="detail-header">
                   <div>
@@ -387,7 +527,7 @@
             <section class="panel mcp-log-panel">
               <div class="panel-toolbar">
                 <div>
-                  <h2>MCP log</h2>
+                  <h2>MCP audit</h2>
                   <div id="mcpLogSubtitle" class="panel-subtitle">0 exchanges</div>
                 </div>
                 <button id="clearMcpLogBtn" class="button ghost compact-button" type="button">Clear</button>
@@ -410,7 +550,7 @@
             </section>
 
             <section class="panel mcp-log-detail-panel">
-              <div id="emptyMcpLogDetail" class="empty-state">Select MCP exchange</div>
+              <div id="emptyMcpLogDetail" class="empty-state">Select audit entry</div>
               <div id="mcpLogDetail" class="detail-content hidden">
                 <div class="detail-header">
                   <div>
@@ -450,8 +590,18 @@
                 <button id="newEchoTabBtn" class="button ghost compact-button" type="button">+ Tab</button>
               </div>
               <div id="echoGroupList" class="echo-group-list hidden"></div>
+              <div id="echoPaneToolbar" class="split-pane-toolbar hidden">
+                <label class="inline-check">
+                  <input id="showEchoRequestToggle" type="checkbox" checked />
+                  <span>Request</span>
+                </label>
+                <label class="inline-check">
+                  <input id="showEchoResponseToggle" type="checkbox" checked />
+                  <span>Response</span>
+                </label>
+              </div>
 
-              <div id="emptyEcho" class="empty-state">Send a request to Echo</div>
+              <div id="emptyEcho" class="empty-state">Send a request to Relay</div>
               <div id="echoWorkspace" class="echo-workspace hidden">
                 <section class="echo-request-pane">
                   <div class="panel-title-row">
@@ -482,7 +632,7 @@
                   </div>
                 </section>
 
-                <div id="echoPaneResizer" class="echo-pane-resizer" role="separator" aria-label="Resize Echo panes"></div>
+                <div id="echoPaneResizer" class="echo-pane-resizer" role="separator" aria-label="Resize Relay panes"></div>
 
                 <section class="echo-response-pane">
                   <div class="panel-title-row">
@@ -510,7 +660,7 @@
             <section class="panel payload-attacks-panel">
               <div class="panel-toolbar">
                 <div>
-                  <h2>Payload attacks</h2>
+                  <h2>Fuzzer runs</h2>
                   <div id="payloadAttacksSubtitle" class="panel-subtitle">0 runs</div>
                 </div>
                 <button id="clearPayloadAttacksBtn" class="button ghost compact-button" type="button">Clear</button>
@@ -550,7 +700,7 @@
             </section>
 
             <section class="panel payload-attack-detail-panel">
-              <div id="emptyPayloadAttackDetail" class="empty-state">Select payload attack</div>
+              <div id="emptyPayloadAttackDetail" class="empty-state">Select fuzzer run</div>
               <div id="payloadAttackDetail" class="detail-content hidden">
                 <div class="detail-header">
                   <div>
@@ -658,6 +808,94 @@
                   <tbody id="secretRows"></tbody>
                 </table>
               </div>
+            </section>
+          </div>
+        </section>
+
+        <section id="mcpConfigView" class="view">
+          <div class="mcp-config-layout">
+            <section class="panel mcp-panel">
+              <div class="panel-title-row">
+                <div>
+                  <h2>MCP server</h2>
+                  <div class="panel-subtitle">Anonymized LLM access to captured traffic and secret aliases</div>
+                </div>
+                <button id="saveMcpBtn" class="button primary compact-button" type="button">Apply MCP</button>
+              </div>
+              <div class="field-grid mcp-field-grid">
+                <label class="inline-check settings-inline-check">
+                  <span>Enabled</span>
+                  <input id="mcpEnabledToggle" type="checkbox" />
+                </label>
+                <label>
+                  Port
+                  <input id="mcpPort" type="number" min="0" max="65535" autocomplete="off" />
+                </label>
+                <label class="mcp-token-field">
+                  Token
+                  <input id="mcpToken" type="text" autocomplete="off" spellcheck="false" />
+                </label>
+                <label class="inline-check settings-inline-check">
+                  <span>Require scope</span>
+                  <input id="mcpRequireScopeToggle" type="checkbox" />
+                </label>
+                <label class="inline-check settings-inline-check">
+                  <span>Active testing</span>
+                  <input id="mcpActiveTestingToggle" type="checkbox" />
+                </label>
+              </div>
+              <div id="mcpEndpoint" class="mcp-endpoint">MCP disabled</div>
+              <div id="mcpStatus" class="hint-line">MCP returns anonymized data only. Real secret values are never returned.</div>
+            </section>
+
+            <section class="panel anonymization-panel">
+              <div class="panel-title-row">
+                <div>
+                  <h2>Anonymization</h2>
+                  <div class="panel-subtitle">Runtime MCP redaction profile</div>
+                </div>
+                <button id="saveAnonymizationBtn" class="button primary compact-button" type="button">Save Anonymization</button>
+              </div>
+              <div class="field-grid anonymization-grid">
+                <label>
+                  Profile
+                  <select id="anonymizationProfile">
+                    <option value="balanced">Balanced pentest</option>
+                    <option value="strict">Strict privacy</option>
+                    <option value="local">Local debug</option>
+                    <option value="custom">Custom</option>
+                  </select>
+                </label>
+                <label>
+                  Max body chars
+                  <input id="anonymizationMaxBodyChars" type="number" min="4096" max="2097152" step="4096" autocomplete="off" />
+                </label>
+                <label class="inline-check settings-inline-check">
+                  <span>Redact hosts</span>
+                  <input id="anonymizationRedactHosts" type="checkbox" />
+                </label>
+                <label class="inline-check settings-inline-check">
+                  <span>Cookie names</span>
+                  <input id="anonymizationCookieNames" type="checkbox" />
+                </label>
+                <label class="inline-check settings-inline-check">
+                  <span>Cookie values</span>
+                  <input id="anonymizationCookieValues" type="checkbox" />
+                </label>
+                <label class="inline-check settings-inline-check">
+                  <span>Authorization</span>
+                  <input id="anonymizationAuthorization" type="checkbox" />
+                </label>
+                <label class="inline-check settings-inline-check">
+                  <span>Platform headers</span>
+                  <input id="anonymizationPlatformHeaders" type="checkbox" />
+                </label>
+                <label class="inline-check settings-inline-check">
+                  <span>Aggressive path</span>
+                  <input id="anonymizationAggressivePath" type="checkbox" />
+                </label>
+              </div>
+              <div id="anonymizationStatus" class="hint-line">Applies to MCP responses only. Local raw views stay unchanged.</div>
             </section>
           </div>
         </section>
@@ -827,7 +1065,7 @@
               </div>
               <div id="projectPath" class="project-path">No project file</div>
               <input id="importProjectInput" class="hidden" type="file" accept="application/json,.json" />
-              <div id="projectActionStatus" class="hint-line">Projects store proxy config, captured traffic, Echo tabs, presets, and findings snapshots.</div>
+              <div id="projectActionStatus" class="hint-line">Projects store proxy config, captured traffic, Relay tabs, Fuzzer tabs, presets, and findings snapshots.</div>
               <div class="recent-projects">
                 <div class="recent-projects-header">
                   <span>Recent projects</span>
@@ -860,90 +1098,6 @@
                 </label>
               </div>
               <div id="proxySaveStatus" class="hint-line">Changing the port rebinds the proxy listener immediately.</div>
-            </section>
-
-            <section class="panel settings-panel mcp-panel">
-              <div class="panel-title-row">
-                <div>
-                  <h2>MCP</h2>
-                  <div class="panel-subtitle">Anonymized LLM access to captured traffic and secret aliases</div>
-                </div>
-                <button id="saveMcpBtn" class="button primary compact-button" type="button">Apply MCP</button>
-              </div>
-              <div class="field-grid mcp-field-grid">
-                <label class="inline-check settings-inline-check">
-                  <span>Enabled</span>
-                  <input id="mcpEnabledToggle" type="checkbox" />
-                </label>
-                <label>
-                  Port
-                  <input id="mcpPort" type="number" min="0" max="65535" autocomplete="off" />
-                </label>
-                <label class="mcp-token-field">
-                  Token
-                  <input id="mcpToken" type="text" autocomplete="off" spellcheck="false" />
-                </label>
-                <label class="inline-check settings-inline-check">
-                  <span>Require scope</span>
-                  <input id="mcpRequireScopeToggle" type="checkbox" />
-                </label>
-                <label class="inline-check settings-inline-check">
-                  <span>Active testing</span>
-                  <input id="mcpActiveTestingToggle" type="checkbox" />
-                </label>
-              </div>
-              <div id="mcpEndpoint" class="mcp-endpoint">MCP disabled</div>
-              <div id="mcpStatus" class="hint-line">MCP returns anonymized data only. Real secret values are never returned.</div>
-            </section>
-
-            <section class="panel settings-panel anonymization-panel">
-              <div class="panel-title-row">
-                <div>
-                  <h2>Anonymization</h2>
-                  <div class="panel-subtitle">Runtime MCP redaction profile</div>
-                </div>
-                <button id="saveAnonymizationBtn" class="button primary compact-button" type="button">Save Anonymization</button>
-              </div>
-              <div class="field-grid anonymization-grid">
-                <label>
-                  Profile
-                  <select id="anonymizationProfile">
-                    <option value="balanced">Balanced pentest</option>
-                    <option value="strict">Strict privacy</option>
-                    <option value="local">Local debug</option>
-                    <option value="custom">Custom</option>
-                  </select>
-                </label>
-                <label>
-                  Max body chars
-                  <input id="anonymizationMaxBodyChars" type="number" min="4096" max="2097152" step="4096" autocomplete="off" />
-                </label>
-                <label class="inline-check settings-inline-check">
-                  <span>Redact hosts</span>
-                  <input id="anonymizationRedactHosts" type="checkbox" />
-                </label>
-                <label class="inline-check settings-inline-check">
-                  <span>Cookie names</span>
-                  <input id="anonymizationCookieNames" type="checkbox" />
-                </label>
-                <label class="inline-check settings-inline-check">
-                  <span>Cookie values</span>
-                  <input id="anonymizationCookieValues" type="checkbox" />
-                </label>
-                <label class="inline-check settings-inline-check">
-                  <span>Authorization</span>
-                  <input id="anonymizationAuthorization" type="checkbox" />
-                </label>
-                <label class="inline-check settings-inline-check">
-                  <span>Platform headers</span>
-                  <input id="anonymizationPlatformHeaders" type="checkbox" />
-                </label>
-                <label class="inline-check settings-inline-check">
-                  <span>Aggressive path</span>
-                  <input id="anonymizationAggressivePath" type="checkbox" />
-                </label>
-              </div>
-              <div id="anonymizationStatus" class="hint-line">Applies to MCP responses only. Local raw views stay unchanged.</div>
             </section>
 
             <section class="panel settings-panel upstream-rules-panel">
@@ -1013,12 +1167,15 @@
     </div>
 
     <div id="contextMenu" class="context-menu hidden" role="menu">
-      <button id="sendToEchoContextBtn" type="button" role="menuitem">Send to Echo</button>
+      <button id="sendToEchoContextBtn" type="button" role="menuitem">Send to Relay</button>
+      <button id="sendToAttackContextBtn" type="button" role="menuitem">Add to Fuzzer</button>
+      <button id="runActiveScanContextBtn" type="button" role="menuitem">Run active scan</button>
       <button id="showFlowsContextBtn" type="button" role="menuitem">Show reqs</button>
       <button id="addToScopeContextBtn" type="button" role="menuitem">Add to scope</button>
       <button id="removeFromScopeContextBtn" type="button" role="menuitem">Remove from scope</button>
     </div>
 
+    <script src="/userAttacksView.js"></script>
     <script src="/attacksView.js"></script>
     <script src="/app.js"></script>
   </body>

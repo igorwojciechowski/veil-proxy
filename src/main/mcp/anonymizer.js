@@ -14,6 +14,31 @@ const DEFAULT_OPTIONS = {
 const PLATFORM_HEADERS = new Set(['server', 'x-powered-by', 'via', 'x-aspnet-version', 'x-runtime']);
 const LOCATION_HEADERS = new Set(['origin', 'referer', 'referrer', 'location']);
 const AUTH_HEADERS = new Set(['authorization', 'proxy-authorization']);
+const SENSITIVE_FIELD_TOKENS = new Set([
+  'apikey',
+  'api_key',
+  'auth',
+  'authorization',
+  'bearer',
+  'clientsecret',
+  'credential',
+  'credentials',
+  'csrf',
+  'mfa',
+  'otp',
+  'pass',
+  'passcode',
+  'passwd',
+  'password',
+  'pin',
+  'privatekey',
+  'pwd',
+  'refresh',
+  'secret',
+  'session',
+  'token',
+  'xsrf',
+]);
 
 class AliasVault {
   constructor() {
@@ -194,7 +219,10 @@ class HttpAnonymizer {
     if (contentType.includes('application/json') || looksLikeJson(clipped)) {
       try {
         const parsed = JSON.parse(clipped);
-        const redacted = redactStructuredValue(parsed, (value) => this.redactText(value, options, replacements, decisions));
+        const redacted = redactStructuredValue(parsed, {
+          redactString: (value) => this.redactText(value, options, replacements, decisions),
+          redactSensitive: (key, value) => redactSensitiveFieldValue(key, value, this.aliasVault, replacements, decisions, 'body'),
+        });
         return {
           text: JSON.stringify(redacted, null, 2),
           replacements,
@@ -208,7 +236,12 @@ class HttpAnonymizer {
     if (contentType.includes('application/x-www-form-urlencoded')) {
       const params = new URLSearchParams(clipped);
       for (const [name, value] of [...params.entries()]) {
-        params.set(name, this.redactText(value, options, replacements, decisions));
+        params.set(
+          name,
+          isSensitiveFieldName(name)
+            ? redactSensitiveFieldValue(name, value, this.aliasVault, replacements, decisions, 'form')
+            : this.redactText(value, options, replacements, decisions),
+        );
       }
       return { text: params.toString(), replacements, decisions };
     }
@@ -317,7 +350,7 @@ function anonymizeUrlValue(value, options, aliasVault, replacements, decisions) 
         .join('/');
     }
     for (const [name, paramValue] of [...parsed.searchParams.entries()]) {
-      parsed.searchParams.set(name, redactUrlParamValue(paramValue, options, aliasVault, replacements, decisions));
+      parsed.searchParams.set(name, redactUrlParamValue(name, paramValue, options, aliasVault, replacements, decisions));
     }
     if (text.startsWith('/')) {
       return { text: `${parsed.pathname}${parsed.search}${parsed.hash}` };
@@ -328,7 +361,10 @@ function anonymizeUrlValue(value, options, aliasVault, replacements, decisions) 
   }
 }
 
-function redactUrlParamValue(value, options, aliasVault, replacements, decisions) {
+function redactUrlParamValue(name, value, options, aliasVault, replacements, decisions) {
+  if (isSensitiveFieldName(name)) {
+    return redactSensitiveFieldValue(name, value, aliasVault, replacements, decisions, 'url-param');
+  }
   const anonymizer = new HttpAnonymizer(aliasVault);
   return anonymizer.redactText(value, options, replacements, decisions);
 }
@@ -410,17 +446,59 @@ function looksLikeJson(text) {
   return (trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'));
 }
 
-function redactStructuredValue(value, redactString) {
-  if (typeof value === 'string') return redactString(value);
-  if (Array.isArray(value)) return value.map((item) => redactStructuredValue(item, redactString));
+function redactStructuredValue(value, handlers, key = '') {
+  if (key && isSensitiveFieldName(key)) {
+    return handlers.redactSensitive(key, value);
+  }
+  if (typeof value === 'string') return handlers.redactString(value);
+  if (Array.isArray(value)) return value.map((item) => redactStructuredValue(item, handlers));
   if (value && typeof value === 'object') {
     const next = {};
     for (const [key, nested] of Object.entries(value)) {
-      next[key] = redactStructuredValue(nested, redactString);
+      next[key] = redactStructuredValue(nested, handlers, key);
     }
     return next;
   }
   return value;
+}
+
+function redactSensitiveFieldValue(fieldName, value, aliasVault, replacements, decisions, area) {
+  if (value === null || value === undefined || value === '') {
+    return value;
+  }
+  const original = typeof value === 'string' ? value : JSON.stringify(value);
+  const alias = aliasVault.alias('secret', `${fieldName}:${original}`);
+  replacements.push({ kind: 'sensitive-field', field: String(fieldName || ''), originalLength: String(original || '').length, replacement: alias });
+  decisions.push({ area, name: String(fieldName || ''), rule: 'sensitive-field' });
+  return alias;
+}
+
+function isSensitiveFieldName(name) {
+  const raw = String(name || '');
+  if (!raw) return false;
+  const normalized = raw
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .toLowerCase();
+  const compact = normalized.replace(/[^a-z0-9]/g, '');
+  if (!compact) return false;
+  if (
+    compact.includes('password') ||
+    compact.includes('passwd') ||
+    compact.includes('passphrase') ||
+    compact.includes('clientsecret') ||
+    compact.includes('privatekey') ||
+    compact.includes('apikey') ||
+    compact.includes('accesstoken') ||
+    compact.includes('refreshtoken') ||
+    compact.includes('idtoken') ||
+    compact.includes('securityanswer')
+  ) {
+    return true;
+  }
+  const tokens = normalized.split(/[^a-z0-9]+/).filter(Boolean);
+  if (tokens.length === 0) return false;
+  if (tokens.includes('security') && tokens.includes('answer')) return true;
+  return tokens.some((token) => SENSITIVE_FIELD_TOKENS.has(token));
 }
 
 module.exports = {

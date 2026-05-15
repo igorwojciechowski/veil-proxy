@@ -360,7 +360,7 @@ test('reuses SOCKS5 upstream connections for sequential HTTP requests', async ()
   }
 });
 
-test('sends Echo requests through configured SOCKS5 upstream proxy', async () => {
+test('sends Relay requests through configured SOCKS5 upstream proxy', async () => {
   const origin = await createOriginServer();
   const socks = await createSocks5Server({ requireIpAddressTypeForIpTargets: true });
   const app = createApp({
@@ -400,6 +400,41 @@ test('sends Echo requests through configured SOCKS5 upstream proxy', async () =>
   } finally {
     await app.stop();
     await socks.close();
+    await origin.close();
+  }
+});
+
+test('records API Relay requests in traffic history with source metadata', async () => {
+  const origin = await createOriginServer();
+  const app = createApp({
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+    },
+  });
+
+  await app.start();
+
+  try {
+    const result = await apiRequest(app.api.port, '/api/echo/send', 'POST', {
+      rawRequest: `GET /echo-source HTTP/1.1\r\nHost: 127.0.0.1:${origin.port}\r\n\r\n`,
+    });
+
+    assert.equal(result.error, null);
+    assert.equal(result.response.statusCode, 200);
+    assert.equal(Boolean(result.historyFlowId), true);
+
+    const history = await apiRequest(app.api.port, '/api/history');
+    const echoFlow = history.find((flow) => flow.id === result.historyFlowId);
+    assert.equal(echoFlow.source, 'echo');
+    assert.equal(echoFlow.tool, 'Relay');
+    assert.equal(echoFlow.path, '/echo-source');
+
+    const fullFlow = await apiRequest(app.api.port, `/api/history/${encodeURIComponent(result.historyFlowId)}`);
+    assert.equal(fullFlow.source, 'echo');
+    assert.equal(fullFlow.tool, 'Relay');
+  } finally {
+    await app.stop();
     await origin.close();
   }
 });
@@ -764,7 +799,59 @@ test('builds passive findings from captured traffic', async () => {
     const findings = await apiRequest(app.api.port, '/api/findings');
     assert.equal(findings.some((finding) => finding.id.startsWith('sensitive-request-data:') && finding.severity === 'high'), true);
     assert.equal(findings.some((finding) => finding.id.startsWith('cleartext-http:') && finding.severity === 'medium'), true);
+    assert.equal(findings.some((finding) => finding.id.startsWith('template:sensitive-token-in-url:') && finding.source === 'scanner'), true);
     assert.equal(findings.every((finding) => Array.isArray(finding.flowIds)), true);
+  } finally {
+    await app.stop();
+    await origin.close();
+  }
+});
+
+test('runs active scanner templates and records tool traffic findings', async () => {
+  const origin = await createOriginServer();
+  const app = createApp({
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+    },
+  });
+
+  await app.start();
+
+  try {
+    const target = `http://127.0.0.1:${origin.port}/reflect`;
+    const response = await proxyRequest(app.proxy.port, {
+      method: 'POST',
+      path: target,
+      headers: {
+        host: `127.0.0.1:${origin.port}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ q: 'seed' }),
+    });
+    assert.equal(response.statusCode, 200);
+
+    const templates = await apiRequest(app.api.port, '/api/scanner/templates');
+    assert.equal(templates.active.some((template) => template.id === 'reflected-xss-basic'), true);
+    assert.equal(templates.active.some((template) => template.id === 'command-injection-basic'), true);
+    assert.equal(templates.passive.some((template) => template.id === 'env-file-exposure'), true);
+
+    const sourceId = app.proxy.listHistory()[0].id;
+    const scan = await apiRequest(app.api.port, '/api/scanner/active/run', 'POST', {
+      id: sourceId,
+      templateIds: ['reflected-xss-basic'],
+      maxRequests: 20,
+      concurrency: 2,
+    });
+
+    assert.equal(scan.sourceId, sourceId);
+    assert.equal(scan.executed > 0, true);
+    assert.equal(scan.findings.some((finding) => finding.id.startsWith('scanner-active:reflected-xss-basic:')), true);
+
+    const history = await apiRequest(app.api.port, '/api/history');
+    assert.equal(history.some((flow) => flow.tool === 'Active Scanner' && flow.source === 'scanner'), true);
+    const findings = await apiRequest(app.api.port, '/api/findings');
+    assert.equal(findings.some((finding) => finding.source === 'scanner' && finding.evidenceSource === 'active_scan'), true);
   } finally {
     await app.stop();
     await origin.close();
@@ -849,6 +936,115 @@ test('serves MCP tool calls with anonymized HTTP output', async () => {
     assert.equal(text.includes('app-1.example.invalid'), true);
     assert.equal(text.includes('cookie-value-1'), true);
     assert.equal(response.result.structuredContent.rawTrafficReturned, undefined);
+  } finally {
+    await app.stop();
+  }
+});
+
+test('MCP anonymization redacts sensitive body fields by name', async () => {
+  const app = createApp({
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+      mcp: {
+        enabled: true,
+        port: 0,
+        token: 'test-token',
+      },
+    },
+  });
+
+  await app.start();
+
+  try {
+    const jsonResponse = await mcpToolCall(app, 'anonymize_http', {
+      message:
+        'POST /api/Users/?resetToken=short-token HTTP/1.1\r\nHost: private.example.com\r\nContent-Type: application/json\r\n\r\n' +
+        JSON.stringify({
+          email: 'alice@example.com',
+          password: 'P@ssw0rd123',
+          passwordRepeat: 'P@ssw0rd123',
+          securityAnswer: 'Test',
+          deluxeToken: 'short-token',
+          securityQuestion: {
+            id: 2,
+            question: "Mother's maiden name?",
+          },
+        }),
+    });
+    const jsonText = jsonResponse.result.structuredContent.message;
+    assert.equal(jsonText.includes('P@ssw0rd123'), false);
+    assert.equal(jsonText.includes('"securityAnswer": "Test"'), false);
+    assert.equal(jsonText.includes('short-token'), false);
+    assert.equal(jsonText.includes('"password": "secret-'), true);
+    assert.equal(jsonText.includes('"passwordRepeat": "secret-'), true);
+    assert.equal(jsonText.includes('"securityAnswer": "secret-'), true);
+    assert.equal(jsonText.includes("Mother's maiden name?"), true);
+
+    const formResponse = await mcpToolCall(app, 'anonymize_http', {
+      message:
+        'POST /login HTTP/1.1\r\nHost: private.example.com\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\n' +
+        'username=alice&password=letmein&csrf=abc123',
+    });
+    const formText = formResponse.result.structuredContent.message;
+    assert.equal(formText.includes('letmein'), false);
+    assert.equal(formText.includes('abc123'), false);
+    assert.match(formText, /password=secret-\d+/);
+    assert.match(formText, /csrf=secret-\d+/);
+  } finally {
+    await app.stop();
+  }
+});
+
+test('rejects enabling MCP until scope is configured', async () => {
+  const app = createApp({
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+      mcp: {
+        enabled: false,
+        port: 0,
+        token: 'test-token',
+      },
+    },
+  });
+
+  await app.start();
+
+  try {
+    await assert.rejects(
+      apiRequest(app.api.port, '/api/config', 'PATCH', {
+        mcp: {
+          enabled: true,
+          port: 0,
+          token: 'test-token',
+        },
+      }),
+      /scope is configured/i,
+    );
+    assert.equal(app.proxy.getConfig().mcp.enabled, false);
+
+    const nextConfig = await apiRequest(app.api.port, '/api/config', 'PATCH', {
+      scope: {
+        enabled: true,
+        rules: [
+          {
+            id: 'mcp-scope',
+            enabled: true,
+            action: 'include',
+            field: 'host',
+            operator: 'contains',
+            value: 'example.com',
+          },
+        ],
+      },
+      mcp: {
+        enabled: true,
+        port: 0,
+        token: 'test-token',
+      },
+    });
+    assert.equal(nextConfig.mcp.enabled, true);
   } finally {
     await app.stop();
   }
@@ -1280,7 +1476,50 @@ test('MCP run_payload_attack sends payload variants and returns anonymized resul
   }
 });
 
-test('MCP sends captured requests to Echo without returning raw traffic', async () => {
+test('runs user Fuzzer requests from marked raw requests', async () => {
+  const origin = await createOriginServer();
+  const app = createApp({
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+    },
+  });
+
+  await app.start();
+
+  try {
+    const attack = await apiRequest(app.api.port, '/api/payload-attacks/run', 'POST', {
+      sourceId: 'manual-source',
+      rawRequest: `GET /echo?x=§p1§ HTTP/1.1\r\nHost: 127.0.0.1:${origin.port}\r\nUser-Agent: Veil Test\r\n\r\n`,
+      insertionPoints: [{ id: 'p1', name: 'query x', listId: 'list-1' }],
+      payloadLists: [{ id: 'list-1', name: 'Payloads', items: ['alpha', 'beta'] }],
+      mode: 'clusterBomb',
+      concurrency: 2,
+    });
+
+    assert.equal(attack.sourceId, 'manual-source');
+    assert.equal(attack.executed, 2);
+    assert.equal(attack.requestedPayloads, 2);
+    assert.equal(attack.concurrency, 2);
+    assert.equal(attack.results.length, 2);
+    assert.equal(attack.results.every((result) => result.sentTrafficId), true);
+    assert.equal(attack.results.every((result) => result.payloadReflected), true);
+
+    const attacks = await apiRequest(app.api.port, '/api/payload-attacks');
+    assert.equal(attacks.some((item) => item.id === attack.id), true);
+    const sent = await apiRequest(app.api.port, '/api/sent-traffic');
+    assert.equal(sent.filter((item) => item.tool === 'payload_attack').length, 2);
+    const history = await apiRequest(app.api.port, '/api/history');
+    const attackTraffic = history.filter((item) => item.source === 'attacks');
+    assert.equal(attackTraffic.length, 2);
+    assert.equal(attackTraffic.every((item) => item.tool === 'Fuzzer'), true);
+  } finally {
+    await app.stop();
+    await origin.close();
+  }
+});
+
+test('MCP sends captured requests to Relay without returning raw traffic', async () => {
   const origin = await createOriginServer();
   const app = createApp({
     config: {
@@ -1508,9 +1747,10 @@ test('builds and exports project reports', async () => {
     const report = await apiRequest(app.api.port, '/api/report');
     assert.equal(report.summary.requests, 1);
     assert.equal(report.summary.inScopeRequests, 1);
-    assert.equal(report.summary.findingsBySeverity.high, 1);
+    assert.equal(report.summary.findingsBySeverity.high >= 1, true);
     assert.equal(report.scope.rules[0].value, '/login');
     assert.equal(report.findings.some((finding) => finding.title === 'Sensitive data in request'), true);
+    assert.equal(report.findings.some((finding) => finding.title === 'Sensitive token in URL'), true);
 
     const markdown = await apiTextRequest(app.api.port, '/api/report/export');
     assert.equal(markdown.statusCode, 200);
@@ -1667,7 +1907,7 @@ test('stores large captured bodies externally and hydrates them from the project
   }
 });
 
-test('persists Echo tabs and groups through the UI state API', async () => {
+test('persists Relay tabs and Fuzzer tabs through the UI state API', async () => {
   const projectPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'veil-proxy-echo-project-')), 'project.sqlite');
   let app = createApp({
     projectPath,
@@ -1727,9 +1967,25 @@ test('persists Echo tabs and groups through the UI state API', async () => {
           },
         ],
       },
+      attacks: {
+        tabs: [
+          {
+            id: 'attack-one',
+            title: 'Saved attack',
+            rawRequest: 'GET /saved?x=§p1§ HTTP/1.1\r\nHost: example.test\r\n\r\n',
+            insertionPoints: [{ id: 'p1', name: 'x', listId: 'list-one' }],
+            payloadLists: [{ id: 'list-one', name: 'Payloads', items: ['a', 'b'] }],
+            selectedListId: 'list-one',
+            mode: 'pitchfork',
+            concurrency: 2,
+          },
+        ],
+        selectedTabId: 'attack-one',
+      },
     });
     assert.equal(saved.echo.tabs[0].title, 'Saved request');
     assert.equal(saved.traffic.presets[0].name, 'API without static');
+    assert.equal(saved.attacks.tabs[0].title, 'Saved attack');
   } finally {
     await app.stop();
   }
@@ -1756,6 +2012,9 @@ test('persists Echo tabs and groups through the UI state API', async () => {
     assert.equal(state.ui.traffic.presets[0].id, 'traffic-api');
     assert.equal(state.ui.traffic.presets[0].filter.extension.exclude, 'png, jpg, css, js');
     assert.equal(state.ui.traffic.presets[0].filter.filters.status.includes('5xx'), true);
+    assert.equal(state.ui.attacks.tabs[0].id, 'attack-one');
+    assert.equal(state.ui.attacks.tabs[0].insertionPoints[0].id, 'p1');
+    assert.equal(state.ui.attacks.tabs[0].payloadLists[0].items.includes('b'), true);
   } finally {
     await app.stop();
   }
@@ -1885,7 +2144,15 @@ test('exports, clears, and imports project snapshots', async () => {
     assert.equal((await apiRequest(app.api.port, '/api/payload-attacks')).length, 0);
     assert.equal((await apiRequest(app.api.port, '/api/mcp/exchanges')).length, 0);
 
+    exported.config.mcp = {
+      ...(exported.config.mcp || {}),
+      enabled: true,
+      port: 0,
+      token: 'import-token',
+    };
+    exported.config.scope = { enabled: false, rules: [] };
     const imported = await apiRequest(app.api.port, '/api/project/import', 'POST', exported);
+    assert.equal(imported.config.mcp.enabled, false);
     assert.equal(imported.history.some((flow) => flow.url === target), true);
     assert.equal(imported.ui.echo.tabs[0].id, 'snapshot-tab');
     assert.equal(imported.sentTraffic.some((record) => record.id === 'sent-snapshot'), true);

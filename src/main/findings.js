@@ -1,3 +1,5 @@
+const { buildTemplateFindings } = require('./scanner');
+
 function buildFindings(history = []) {
   const findings = new Map();
 
@@ -12,6 +14,10 @@ function buildFindings(history = []) {
     inspectSecurityHeaders(findings, flow);
     inspectCookies(findings, flow);
     inspectCors(findings, flow);
+  }
+
+  for (const finding of buildTemplateFindings(history)) {
+    findings.set(finding.id, finding);
   }
 
   return [...findings.values()]

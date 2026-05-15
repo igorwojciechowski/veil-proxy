@@ -1,0 +1,234 @@
+[
+  {
+    "id": "reflected-xss-basic",
+    "title": "Potential reflected XSS",
+    "severity": "high",
+    "confidence": "tentative",
+    "category": "XSS",
+    "description": "A payload inserted into the request was reflected in the response. Manual validation is required before treating this as exploitable XSS.",
+    "remediation": "Encode untrusted data for the output context and validate inputs server-side.",
+    "payloads": [
+      "VEILXSS\"><svg/onload=alert(1337)>",
+      "'\"><img src=x onerror=alert(1337)>",
+      "<script>alert(1337)</script>",
+      "javascript:alert(1337)"
+    ],
+    "insertionPoints": ["query", "form", "json"],
+    "matchers": [
+      {
+        "type": "reflection"
+      }
+    ]
+  },
+  {
+    "id": "sql-error-basic",
+    "title": "Potential SQL injection error",
+    "severity": "high",
+    "confidence": "firm",
+    "category": "SQL Injection",
+    "description": "A SQL-oriented payload produced a response containing database error text.",
+    "remediation": "Use parameterized queries and avoid string-concatenated SQL.",
+    "payloads": [
+      "'",
+      "\"",
+      "' OR '1'='1",
+      "1') OR ('1'='1",
+      "')) OR 1=1--"
+    ],
+    "insertionPoints": ["query", "form", "json"],
+    "matchers": [
+      {
+        "part": "response.body",
+        "type": "regex",
+        "pattern": "\\b(?:SQLITE_ERROR|SQL syntax|syntax error|PostgreSQL|MySQL|MariaDB|ODBC|JDBC|SequelizeDatabaseError|ORA-\\d{4,5}|SQL Server|PDOException)\\b"
+      }
+    ]
+  },
+  {
+    "id": "nosql-error-basic",
+    "title": "Potential NoSQL injection error",
+    "severity": "high",
+    "confidence": "firm",
+    "category": "NoSQL Injection",
+    "description": "A NoSQL-oriented payload produced a response containing database parser or operator error text.",
+    "remediation": "Treat user input as data, reject operator objects from untrusted input, and use strict query builders.",
+    "payloads": [
+      "{\"$ne\":null}",
+      "{\"$gt\":\"\"}",
+      "{\"$regex\":\".*\"}",
+      "' || '1'=='1"
+    ],
+    "insertionPoints": ["query", "form", "json"],
+    "matchers": [
+      {
+        "part": "response.body",
+        "type": "regex",
+        "pattern": "MongoError|BSONError|CastError|unknown operator|\\$where|Unrecognized expression|CouchDB|NoSQL"
+      }
+    ]
+  },
+  {
+    "id": "command-injection-basic",
+    "title": "Potential command injection",
+    "severity": "high",
+    "confidence": "firm",
+    "category": "Command Injection",
+    "description": "A shell metacharacter payload produced output that resembles command execution.",
+    "remediation": "Avoid shell execution with user input; use fixed argument arrays and strict allowlists.",
+    "payloads": [
+      ";id",
+      "|id",
+      "&& id",
+      "`id`",
+      "$(id)",
+      "& whoami"
+    ],
+    "insertionPoints": ["query", "form", "json"],
+    "matchers": [
+      {
+        "part": "response.body",
+        "type": "regex",
+        "pattern": "\\buid=\\d+\\([^)]*\\)\\s+gid=\\d+|\\broot\\b.*\\bwheel\\b|(?:nt authority|desktop-[a-z0-9]+\\\\[a-z0-9_-]+)"
+      }
+    ]
+  },
+  {
+    "id": "ssti-basic",
+    "title": "Potential server-side template injection",
+    "severity": "high",
+    "confidence": "tentative",
+    "category": "SSTI",
+    "description": "A template expression payload produced evaluated output in the response.",
+    "remediation": "Do not render user-controlled strings as templates; sandbox or remove template evaluation for untrusted data.",
+    "payloads": [
+      "{{7*7}}",
+      "${7*7}",
+      "<%= 7*7 %>",
+      "#{7*7}",
+      "${{7*7}}"
+    ],
+    "insertionPoints": ["query", "form", "json"],
+    "matchers": [
+      {
+        "part": "response.body",
+        "type": "regex",
+        "pattern": "(^|[^0-9])49([^0-9]|$)"
+      }
+    ]
+  },
+  {
+    "id": "path-traversal-basic",
+    "title": "Potential path traversal",
+    "severity": "high",
+    "confidence": "firm",
+    "category": "Path Traversal",
+    "description": "A traversal payload produced a response that resembles a sensitive local file.",
+    "remediation": "Normalize and constrain file paths to an allowlisted base directory.",
+    "payloads": [
+      "../../../../etc/passwd",
+      "..%2f..%2f..%2f..%2fetc%2fpasswd",
+      "..%252f..%252f..%252f..%252fetc%252fpasswd",
+      "..%5c..%5c..%5c..%5cwindows%5cwin.ini"
+    ],
+    "insertionPoints": ["query", "form", "path"],
+    "matchers": [
+      {
+        "part": "response.body",
+        "type": "regex",
+        "pattern": "root:.*:0:0:|\\[fonts\\]|\\[extensions\\]|for 16-bit app support"
+      }
+    ]
+  },
+  {
+    "id": "open-redirect-basic",
+    "title": "Potential open redirect",
+    "severity": "medium",
+    "confidence": "firm",
+    "category": "Open Redirect",
+    "description": "A redirect target payload was reflected in response headers with a redirect status.",
+    "remediation": "Allowlist redirect destinations and resolve relative paths server-side.",
+    "payloads": [
+      "https://example.com/veil-redirect",
+      "//example.com/veil-redirect",
+      "https:%2f%2fexample.com%2fveil-redirect"
+    ],
+    "insertionPoints": ["query", "form", "json"],
+    "matchers": [
+      {
+        "type": "status",
+        "status": [301, 302, 303, 307, 308]
+      },
+      {
+        "part": "response.headers",
+        "type": "contains_payload"
+      }
+    ]
+  },
+  {
+    "id": "ldap-injection-error",
+    "title": "Potential LDAP injection error",
+    "severity": "medium",
+    "confidence": "firm",
+    "category": "LDAP Injection",
+    "description": "An LDAP-oriented payload produced parser or filter error text.",
+    "remediation": "Escape LDAP filter values and use API-level filter builders.",
+    "payloads": [
+      "*",
+      "*)(",
+      ")(uid=*))(|(uid=*",
+      "*)(objectClass=*"
+    ],
+    "insertionPoints": ["query", "form", "json"],
+    "matchers": [
+      {
+        "part": "response.body",
+        "type": "regex",
+        "pattern": "LDAPException|InvalidSearchFilter|Bad search filter|LDAP filter|Unbalanced parenthesis"
+      }
+    ]
+  },
+  {
+    "id": "xpath-injection-error",
+    "title": "Potential XPath injection error",
+    "severity": "medium",
+    "confidence": "firm",
+    "category": "XPath Injection",
+    "description": "An XPath-oriented payload produced XPath parser error text.",
+    "remediation": "Use parameterized XPath APIs or strict allowlists for XPath fragments.",
+    "payloads": [
+      "'",
+      "\"]",
+      "' or '1'='1",
+      "'] | //* | //*[contains(.,'"
+    ],
+    "insertionPoints": ["query", "form", "json"],
+    "matchers": [
+      {
+        "part": "response.body",
+        "type": "regex",
+        "pattern": "XPathException|XPath error|Invalid XPath|javax\\.xml\\.xpath|libxml2"
+      }
+    ]
+  },
+  {
+    "id": "xxe-basic",
+    "title": "Potential XXE",
+    "severity": "high",
+    "confidence": "tentative",
+    "category": "XXE",
+    "description": "An XML external entity payload produced local-file-like output or XML parser security errors.",
+    "remediation": "Disable external entity resolution and DTD processing in XML parsers.",
+    "payloads": [
+      "<?xml version=\"1.0\"?><!DOCTYPE x [<!ENTITY veil SYSTEM \"file:///etc/passwd\">]><x>&veil;</x>",
+      "<?xml version=\"1.0\"?><!DOCTYPE x [<!ENTITY veil SYSTEM \"file:///c:/windows/win.ini\">]><x>&veil;</x>"
+    ],
+    "insertionPoints": ["xml"],
+    "matchers": [
+      {
+        "part": "response.body",
+        "type": "regex",
+        "pattern": "root:.*:0:0:|\\[fonts\\]|DOCTYPE is disallowed|External Entity|entity.*not allowed"
+      }
+    ]
+  }
+]

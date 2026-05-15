@@ -69,7 +69,7 @@
               </tr>
             `;
           })
-          .join('') || '<tr><td colspan="7"><div class="empty-state compact-empty">No payload attack runs match filters</div></td></tr>';
+          .join('') || '<tr><td colspan="7"><div class="empty-state compact-empty">No fuzzer runs match filters</div></td></tr>';
 
       renderDetail();
     }
@@ -150,7 +150,7 @@
 
     async function clear() {
       if (!state.payloadAttacks.length) return;
-      if (!window.confirm('Clear payload attack run history? Sent traffic will stay intact.')) {
+      if (!window.confirm('Clear fuzzer run history? Issued HTTP will stay intact.')) {
         return;
       }
       state.payloadAttacks = await api('/api/payload-attacks', { method: 'DELETE' });
@@ -239,7 +239,7 @@
 
   function summaryText(record) {
     return [
-      `Attack ID: ${record.id || '-'}`,
+      `Fuzzer run ID: ${record.id || '-'}`,
       `Source: ${record.sourceId ? `#${record.sourceId}` : '-'}`,
       `Target: ${record.method || '-'} ${record.url || '-'}`,
       `Insertion: ${insertionPointLabel(record.insertionPoint)}`,
