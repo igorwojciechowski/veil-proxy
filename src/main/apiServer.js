@@ -46,6 +46,7 @@ class ApiServer {
     this.proxy.on('findings', (findings) => this.broadcast('findings', findings));
     this.proxy.on('sent-traffic', (items) => this.broadcast('sent-traffic', items));
     this.proxy.on('payload-attacks', (items) => this.broadcast('payload-attacks', items));
+    this.proxy.on('active-scans', (items) => this.broadcast('active-scans', items));
     if (this.mcp && typeof this.mcp.on === 'function') {
       this.mcp.on('mcp-exchanges', (items) => {
         if (this.store && this.mcp.exchanges) {
@@ -254,9 +255,48 @@ class ApiServer {
         return;
       }
 
+      if (parsed.pathname === '/api/scanner/active' && req.method === 'GET') {
+        this.json(res, this.proxy.listActiveScans ? this.proxy.listActiveScans() : []);
+        return;
+      }
+
       if (parsed.pathname === '/api/scanner/active/run' && req.method === 'POST') {
         const body = await readJson(req);
         this.json(res, await this.proxy.runActiveScannerFromRequest(body));
+        return;
+      }
+
+      const activeScanActionMatch = parsed.pathname.match(/^\/api\/scanner\/active\/([^/]+)\/(pause|resume|stop)$/);
+      if (activeScanActionMatch && req.method === 'POST') {
+        const record = this.proxy.updateActiveScan
+          ? this.proxy.updateActiveScan(decodeURIComponent(activeScanActionMatch[1]), activeScanActionMatch[2])
+          : null;
+        if (!record) {
+          this.notFound(res);
+          return;
+        }
+        this.json(res, record);
+        return;
+      }
+
+      const activeScanMatch = parsed.pathname.match(/^\/api\/scanner\/active\/([^/]+)$/);
+      if (activeScanMatch && req.method === 'GET') {
+        const record = this.proxy.getActiveScan ? this.proxy.getActiveScan(decodeURIComponent(activeScanMatch[1])) : null;
+        if (!record) {
+          this.notFound(res);
+          return;
+        }
+        this.json(res, record);
+        return;
+      }
+
+      if (activeScanMatch && req.method === 'DELETE') {
+        const record = this.proxy.deleteActiveScan ? this.proxy.deleteActiveScan(decodeURIComponent(activeScanMatch[1])) : null;
+        if (!record) {
+          this.notFound(res);
+          return;
+        }
+        this.json(res, record);
         return;
       }
 
@@ -424,6 +464,7 @@ class ApiServer {
       pending: this.proxy.listPending(),
       sentTraffic: this.proxy.listSentTraffic ? this.proxy.listSentTraffic() : [],
       payloadAttacks: this.proxy.listPayloadAttacks ? this.proxy.listPayloadAttacks() : [],
+      activeScans: this.proxy.listActiveScans ? this.proxy.listActiveScans() : [],
       mcpExchanges: this.mcp && this.mcp.listExchanges ? this.mcp.listExchanges() : [],
       mcpSecrets: this.mcp ? this.mcp.secretVault.list() : [],
       proxyPort: this.proxy.port,

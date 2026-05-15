@@ -44,7 +44,7 @@ function buildTemplateFindings(history = [], templates = loadPassiveTemplates())
   }));
 }
 
-async function runActiveScan({ proxy, flow, templateIds = [], maxRequests = 60, concurrency = 3 } = {}) {
+async function runActiveScan({ proxy, flow, templateIds = [], maxRequests = 60, concurrency = 3, control = null, onProgress = null } = {}) {
   if (!proxy || !flow || !flow.request || flow.type !== 'http') {
     throw new Error('Active scanner needs a captured HTTP request.');
   }
@@ -64,7 +64,18 @@ async function runActiveScan({ proxy, flow, templateIds = [], maxRequests = 60, 
 
   const startedAt = Date.now();
   const findings = [];
-  const results = await runWithConcurrency(variants, parallel, async (variant) => executeActiveVariant(proxy, flow, variant, findings));
+  const results = await runWithConcurrency(variants, parallel, async (variant) => {
+    const before = await waitForScanSlot(control);
+    if (before?.stopped) {
+      return skippedActiveResult(variant, before.reason || 'stopped');
+    }
+    const result = await executeActiveVariant(proxy, flow, variant, findings);
+    if (typeof onProgress === 'function') {
+      onProgress(result);
+    }
+    return result;
+  });
+  const executedResults = results.filter((result) => result && !result.skipped);
 
   return {
     id: `scan-${flow.id}-${startedAt}`,
@@ -72,10 +83,39 @@ async function runActiveScan({ proxy, flow, templateIds = [], maxRequests = 60, 
     startedAt,
     completedAt: Date.now(),
     requested: variants.length,
-    executed: results.length,
+    executed: executedResults.length,
+    stopped: Boolean(control?.stopped),
     findings,
     results,
   };
+}
+
+async function waitForScanSlot(control) {
+  if (!control) return null;
+  while (control.paused && !control.stopped) {
+    await delay(100);
+  }
+  return control.stopped ? { stopped: true, reason: control.stopReason || 'stopped' } : null;
+}
+
+function skippedActiveResult(variant, reason) {
+  return {
+    index: variant.index,
+    templateId: variant.template.id,
+    title: variant.template.title,
+    insertionPoint: variant.point,
+    statusCode: null,
+    durationMs: 0,
+    historyFlowId: '',
+    matched: false,
+    findingId: '',
+    skipped: true,
+    error: reason,
+  };
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function executeActiveVariant(proxy, sourceFlow, variant, findings) {

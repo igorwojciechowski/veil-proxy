@@ -5,6 +5,7 @@ const { AliasVault, HttpAnonymizer } = require('./anonymizer');
 const { ControlledPayloadRegistry } = require('./controlledPayloads');
 const { McpTools } = require('./mcpTools');
 const { SecretVault } = require('./secretVault');
+const { VeilCoreBridge } = require('./veilCoreBridge');
 
 const DEFAULT_PROTOCOL_VERSION = '2025-06-18';
 
@@ -17,12 +18,14 @@ class McpServer extends EventEmitter {
     this.secretVault = new SecretVault();
     this.controlledPayloads = new ControlledPayloadRegistry();
     this.anonymizer = new HttpAnonymizer(this.aliasVault, this.controlledPayloads);
+    this.veilCore = new VeilCoreBridge(this.configProvider);
     this.tools = new McpTools({
       proxy,
       anonymizer: this.anonymizer,
       aliasVault: this.aliasVault,
       secretVault: this.secretVault,
       controlledPayloads: this.controlledPayloads,
+      veilCore: this.veilCore,
       configProvider: this.configProvider,
     });
     this.server = null;
@@ -103,6 +106,8 @@ class McpServer extends EventEmitter {
       activeTesting: config.activeTesting === true,
       lastError: this.lastError,
       aliasMappings: this.aliasVault.mappingCount(),
+      veilCoreEnabled: this.veilCore.enabled(),
+      veilCoreLastError: this.veilCore.lastError || '',
       secretCount: this.secretVault.count(),
       controlledPayloadCount: this.controlledPayloads.count(),
       exchangeCount: this.exchanges.length,

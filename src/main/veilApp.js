@@ -75,6 +75,11 @@ function mergeConfig(base, override) {
       ...(override && override[key] ? clone(override[key]) : {}),
     };
   }
+  next.veilCore = {
+    ...(base && base.veilCore ? clone(base.veilCore) : {}),
+    ...(override && override.veilCore ? clone(override.veilCore) : {}),
+    enabled: false,
+  };
 
   for (const key of ['upstreams', 'upstreamRules', 'rewriteRules']) {
     if (Object.prototype.hasOwnProperty.call(override || {}, key)) {

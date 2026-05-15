@@ -6,6 +6,7 @@ const { closeIdleTransports, createTunnel, requestViaTransport } = require('./tr
 const { CertificateAuthority } = require('./certAuthority');
 const { buildFindings } = require('./findings');
 const { loadActiveTemplates, loadPassiveTemplates, runActiveScan } = require('./scanner');
+const { VeilCoreBridge } = require('./mcp/veilCoreBridge');
 const {
   decodeBody,
   encodeBodyForClient,
@@ -31,10 +32,20 @@ class ProxyServer extends EventEmitter {
     this.reportedFindings = sanitizeReportedFindings(options.reportedFindings || (this.store && this.store.getFindings ? this.store.getFindings() : []));
     this.sentTraffic = sanitizeSentTraffic(options.sentTraffic || (this.store && this.store.getSentTraffic ? this.store.getSentTraffic() : []));
     this.payloadAttacks = sanitizePayloadAttacks(options.payloadAttacks || (this.store && this.store.getPayloadAttacks ? this.store.getPayloadAttacks() : []));
+    this.activeScans = [];
     this.port = this.config.proxyPort;
     this.certAuthority = new CertificateAuthority(this.config.https && this.config.https.certDir);
     this.mitmTargets = new WeakMap();
     this.mitmHttpServer = http.createServer(this.handleMitmHttpRequest.bind(this));
+    this.mitmHttpServer.on('clientError', (_error, socket) => {
+      if (socket && !socket.destroyed) {
+        socket.destroy();
+      }
+    });
+    this.mitmHttpServer.on('error', (error) => {
+      this.emit('mitm-error', error);
+    });
+    this.veilCore = new VeilCoreBridge(() => ({ veilCore: this.config.veilCore }));
   }
 
   createHttpServer() {
@@ -113,6 +124,9 @@ class ProxyServer extends EventEmitter {
             }
           : this.config.mcp,
       ),
+      veilCore: Object.prototype.hasOwnProperty.call(nextConfig, 'veilCore')
+        ? sanitizeVeilCore({ ...this.config.veilCore, ...nextConfig.veilCore })
+        : sanitizeVeilCore(this.config.veilCore),
       upstreams: Object.prototype.hasOwnProperty.call(nextConfig, 'upstreams')
         ? sanitizeUpstreams(nextConfig.upstreams)
         : this.config.upstreams || [],
@@ -211,13 +225,138 @@ class ProxyServer extends EventEmitter {
     if (!flow || flow.type !== 'http' || !flow.request) {
       throw new Error('Captured HTTP request not found.');
     }
-    return runActiveScan({
+    if (payload.async === true || payload.background === true) {
+      return this.startActiveScan(flow, payload);
+    }
+    const record = this.createActiveScanRecord(flow, payload, 'running');
+    this.emitActiveScans();
+    const result = await this.executeActiveScanRecord(record, flow, payload);
+    return result;
+  }
+
+  startActiveScan(flow, payload = {}) {
+    const record = this.createActiveScanRecord(flow, payload, 'running');
+    this.activeScans.unshift(record);
+    this.activeScans = this.activeScans.slice(0, 100);
+    this.emitActiveScans();
+    this.executeActiveScanRecord(record, flow, payload).catch((error) => {
+      record.status = 'error';
+      record.error = error.message;
+      record.completedAt = Date.now();
+      this.emitActiveScans();
+    });
+    return activeScanSummary(record);
+  }
+
+  createActiveScanRecord(flow, payload = {}, status = 'queued') {
+    const startedAt = Date.now();
+    return {
+      id: `active-${flow.id}-${startedAt}`,
+      sourceId: flow.id,
+      sourceMethod: flow.request.method || '',
+      sourceUrl: flow.request.url || '',
+      sourceHost: safeUrlParts(flow.request.url || '').host || '',
+      sourcePath: safeUrlParts(flow.request.url || '').path || '/',
+      templateIds: Array.isArray(payload.templateIds) ? payload.templateIds.map(String).filter(Boolean) : [],
+      maxRequests: normalizeActiveScanNumber(payload.maxRequests, 60),
+      concurrency: normalizeActiveScanNumber(payload.concurrency, 3),
+      requested: 0,
+      executed: 0,
+      matched: 0,
+      findingIds: [],
+      resultCount: 0,
+      status,
+      error: '',
+      startedAt,
+      completedAt: null,
+      paused: false,
+      stopped: false,
+      stopReason: '',
+      results: [],
+      findings: [],
+    };
+  }
+
+  async executeActiveScanRecord(record, flow, payload = {}) {
+    record.status = 'running';
+    const control = record;
+    const result = await runActiveScan({
       proxy: this,
       flow,
       templateIds: Array.isArray(payload.templateIds) ? payload.templateIds : [],
       maxRequests: payload.maxRequests,
       concurrency: payload.concurrency,
+      control,
+      onProgress: (scanResult) => {
+        if (!scanResult?.skipped) {
+          record.executed += 1;
+          record.resultCount += 1;
+          if (scanResult.matched) record.matched += 1;
+          if (scanResult.findingId && !record.findingIds.includes(scanResult.findingId)) {
+            record.findingIds.push(scanResult.findingId);
+          }
+          record.results.push(scanResult);
+          record.results = record.results.slice(-200);
+          this.emitActiveScans();
+        }
+      },
     });
+    record.status = record.stopped ? 'stopped' : 'completed';
+    record.completedAt = result.completedAt || Date.now();
+    record.requested = result.requested;
+    record.executed = result.executed;
+    record.matched = result.results.filter((item) => item?.matched).length;
+    record.resultCount = result.results.length;
+    record.findings = result.findings;
+    record.findingIds = uniqueStrings([...(record.findingIds || []), ...result.findings.map((finding) => finding.id)]);
+    record.results = result.results;
+    this.emitActiveScans();
+    return structuredClone({ ...result, activeScanId: record.id, status: record.status });
+  }
+
+  listActiveScans() {
+    return this.activeScans.map(activeScanSummary);
+  }
+
+  getActiveScan(id) {
+    const record = this.activeScans.find((item) => item.id === String(id)) || null;
+    return record ? structuredClone(record) : null;
+  }
+
+  updateActiveScan(id, action) {
+    const record = this.activeScans.find((item) => item.id === String(id));
+    if (!record) return null;
+    if (action === 'pause' && record.status === 'running') {
+      record.paused = true;
+      record.status = 'paused';
+    } else if (action === 'resume' && record.status === 'paused') {
+      record.paused = false;
+      record.status = 'running';
+    } else if (action === 'stop' && ['running', 'paused', 'queued'].includes(record.status)) {
+      record.paused = false;
+      record.stopped = true;
+      record.stopReason = 'stopped';
+      record.status = 'stopping';
+    }
+    this.emitActiveScans();
+    return activeScanSummary(record);
+  }
+
+  deleteActiveScan(id) {
+    const record = this.activeScans.find((item) => item.id === String(id));
+    if (!record) return null;
+    if (['running', 'paused', 'queued', 'stopping'].includes(record.status)) {
+      record.stopped = true;
+      record.paused = false;
+      record.stopReason = 'deleted';
+    }
+    this.activeScans = this.activeScans.filter((item) => item.id !== String(id));
+    this.emitActiveScans();
+    return activeScanSummary(record);
+  }
+
+  emitActiveScans() {
+    this.emit('active-scans', this.listActiveScans());
   }
 
   getReportedFindings() {
@@ -734,12 +873,13 @@ class ProxyServer extends EventEmitter {
 
       this.emitHistory(flow);
 
+      const outboundUrl = new URL(flow.request.url);
       const upstreamResponse = await requestViaTransport({
-        targetUrl: new URL(flow.request.url),
+        targetUrl: outboundUrl,
         method: flow.request.method,
         headers: normalizeHeaderObject(flow.request.headers),
         body: Buffer.from(flow.request.bodyBase64 || '', 'base64'),
-        upstream: this.resolveUpstream(new URL(flow.request.url)),
+        upstream: this.resolveUpstream(outboundUrl),
         maxBodyBytes: this.config.maxBodyBytes,
         ignoreCertificateErrors: Boolean(this.config.https && this.config.https.ignoreUpstreamCertificateErrors),
       });
@@ -814,6 +954,159 @@ class ProxyServer extends EventEmitter {
         clientRes.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
       }
       clientRes.end(`Veil Proxy upstream error: ${error.message}`);
+    }
+  }
+
+  veilCoreConfig() {
+    return sanitizeVeilCore(this.config.veilCore);
+  }
+
+  async prepareVeilCoreOutboundRequest(flow) {
+    const request = flow.request || {};
+    const headers = normalizeHeaderObject(request.headers || {});
+    const body = Buffer.from(request.bodyBase64 || '', 'base64');
+    const outbound = {
+      method: request.method || 'GET',
+      url: request.url || '',
+      headers: { ...headers },
+      body,
+    };
+    const cfg = this.veilCoreConfig();
+    if (!cfg.enabled || !cfg.rehydrateRequests) {
+      return outbound;
+    }
+
+    try {
+      const urlResult = await this.veilCore.detokenizeText(outbound.url, 'upstream_request');
+      outbound.url = urlResult.text || outbound.url;
+      const outboundUrl = new URL(outbound.url);
+
+      const nextHeaders = {};
+      for (const [name, value] of Object.entries(outbound.headers)) {
+        const detokenized = await this.veilCore.detokenizeText(String(value), 'upstream_request');
+        nextHeaders[name] = detokenized.text;
+      }
+      nextHeaders.host = outboundUrl.host;
+      outbound.headers = nextHeaders;
+
+      if (body.length > 0 && canRewriteHttpBody(outbound.headers) && isVeilCoreTextContent(outbound.headers)) {
+        const bodyResult = await this.veilCore.detokenizeText(request.bodyText || body.toString('utf8'), 'upstream_request');
+        outbound.body = Buffer.from(bodyResult.text || '', 'utf8');
+        outbound.headers['content-length'] = String(outbound.body.length);
+        delete outbound.headers['content-md5'];
+      }
+      return outbound;
+    } catch (error) {
+      flow.notes.push(`Veil Core request rehydration failed: ${error.message}`);
+      if (cfg.fallbackOnError === false) {
+        throw error;
+      }
+      return outbound;
+    }
+  }
+
+  async applyVeilCoreRequestSanitization(flow) {
+    const cfg = this.veilCoreConfig();
+    if (!cfg.enabled || !flow.request) {
+      return;
+    }
+
+    try {
+      const urlResult = await this.veilCore.sanitizeText(flow.request.url || '', 'proxy_request');
+      flow.request.url = urlResult.text || flow.request.url;
+
+      const headers = normalizeHeaderObject(flow.request.headers || {});
+      const nextHeaders = {};
+      for (const [name, value] of Object.entries(headers)) {
+        const headerResult = await this.veilCore.sanitizeText(String(value), 'proxy_request');
+        nextHeaders[name] = headerResult.text;
+      }
+      flow.request.headers = nextHeaders;
+
+      if (flow.request.bodyBase64 && canRewriteHttpBody(flow.request.headers) && isVeilCoreTextContent(flow.request.headers)) {
+        const bodyResult = await this.veilCore.sanitizeText(flow.request.bodyText || '', 'proxy_request');
+        flow.request.bodyText = bodyResult.text;
+        flow.request.bodyBase64 = Buffer.from(bodyResult.text, 'utf8').toString('base64');
+        flow.request.headers['content-length'] = String(Buffer.byteLength(bodyResult.text));
+        delete flow.request.headers['content-md5'];
+      }
+    } catch (error) {
+      flow.notes.push(`Veil Core request sanitization failed: ${error.message}`);
+      throw new Error('Veil Core request sanitization failed; refusing to store unsanitized request.');
+    }
+  }
+
+  async applyVeilCoreResponseSanitization(flow) {
+    const cfg = this.veilCoreConfig();
+    if (!cfg.enabled || !cfg.sanitizeResponses || !flow.response) {
+      return;
+    }
+    if (!canRewriteHttpBody(flow.response.headers) || !isVeilCoreTextContent(flow.response.headers)) {
+      return;
+    }
+
+    try {
+      const current = flow.response.bodyText || Buffer.from(flow.response.bodyBase64 || '', 'base64').toString('utf8');
+      const sanitized = await this.veilCore.sanitizeText(current, 'proxy_response');
+      if (sanitized.text !== current) {
+        flow.response.bodyText = sanitized.text;
+        flow.response.bodyBase64 = Buffer.from(sanitized.text, 'utf8').toString('base64');
+        flow.response.bodyEncoding = 'identity';
+        const headers = normalizeHeaderObject(flow.response.headers);
+        delete headers['content-encoding'];
+        delete headers['content-md5'];
+        headers['content-length'] = String(Buffer.byteLength(sanitized.text));
+        flow.response.headers = headers;
+        flow.notes.push(`Veil Core sanitized response (${sanitized.aliasMappings || 0} tokens).`);
+      }
+    } catch (error) {
+      flow.notes.push(`Veil Core response sanitization failed: ${error.message}`);
+      throw new Error('Veil Core response sanitization failed; refusing to return unsanitized response.');
+    }
+  }
+
+  async sanitizeStoredVeilCoreResponse(flow) {
+    try {
+      await this.applyVeilCoreResponseSanitization(flow);
+    } catch (error) {
+      if (flow.response) {
+        const message = '[Veil Core blocked response body: sanitization failed]';
+        flow.response.bodyText = message;
+        flow.response.bodyBase64 = Buffer.from(message, 'utf8').toString('base64');
+        flow.response.bodyEncoding = 'identity';
+        const headers = normalizeHeaderObject(flow.response.headers);
+        delete headers['content-encoding'];
+        delete headers['content-md5'];
+        headers['content-type'] = headers['content-type'] || 'text/plain; charset=utf-8';
+        headers['content-length'] = String(Buffer.byteLength(message));
+        flow.response.headers = headers;
+      }
+      flow.notes.push(error.message);
+    }
+  }
+
+  async auditVeilCoreTraffic(flow) {
+    const cfg = this.veilCoreConfig();
+    if (!cfg.enabled || !cfg.auditTraffic) {
+      return;
+    }
+
+    try {
+      await this.veilCore.auditEventBatch([
+        {
+          operation: 'proxy_http_flow',
+          subject: 'traffic',
+          action: 'forward',
+          summary: `${flow.request?.method || 'GET'} ${flow.request?.url || ''} -> ${flow.response?.statusCode || flow.error || 'ERR'}`,
+          metadata: {
+            flow_id: flow.id,
+            status_code: flow.response ? flow.response.statusCode : null,
+            error: flow.error || null,
+          },
+        },
+      ]);
+    } catch (error) {
+      flow.notes.push(`Veil Core audit failed: ${error.message}`);
     }
   }
 
@@ -925,6 +1218,22 @@ class ProxyServer extends EventEmitter {
     flow.notes.push('HTTPS MITM enabled. Decrypted requests are recorded as HTTPS flows.');
 
     try {
+      const finalize = () => {
+        if (!flow.completedAt) {
+          flow.completedAt = Date.now();
+          flow.durationMs = flow.completedAt - startedAt;
+          this.emitHistory(flow);
+        }
+      };
+      const markError = (error) => {
+        if (error && !flow.error) {
+          flow.error = error.message;
+        }
+      };
+
+      clientSocket.on('error', markError);
+      clientSocket.on('close', finalize);
+
       const context = this.certAuthority.getSecureContext(flow.tunnel.host);
       clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
       if (head && head.length > 0) {
@@ -942,30 +1251,22 @@ class ProxyServer extends EventEmitter {
         port: flow.tunnel.port,
       });
 
-      const finalize = () => {
-        if (!flow.completedAt) {
-          flow.completedAt = Date.now();
-          flow.durationMs = flow.completedAt - startedAt;
-          this.emitHistory(flow);
-        }
-      };
-
       tlsSocket.once('secure', () => {
         this.mitmHttpServer.emit('connection', tlsSocket);
       });
       tlsSocket.on('data', (chunk) => {
         flow.tunnel.bytesUp += chunk.length;
       });
-      tlsSocket.on('error', (error) => {
-        flow.error = error.message;
-      });
+      tlsSocket.on('error', markError);
       tlsSocket.on('close', finalize);
     } catch (error) {
       flow.error = error.message;
       flow.completedAt = Date.now();
       flow.durationMs = flow.completedAt - startedAt;
       this.emitHistory(flow);
-      clientSocket.end('HTTP/1.1 502 Bad Gateway\r\ncontent-type: text/plain\r\n\r\nVeil Proxy HTTPS MITM error\r\n');
+      if (!clientSocket.destroyed) {
+        clientSocket.end('HTTP/1.1 502 Bad Gateway\r\ncontent-type: text/plain\r\n\r\nVeil Proxy HTTPS MITM error\r\n');
+      }
     }
   }
 
@@ -1019,6 +1320,46 @@ class ProxyServer extends EventEmitter {
   emitHistory(flow) {
     this.persistFlow(flow);
     this.emit('history', this.summarizeFlow(flow));
+  }
+
+  async addFlowHistory(flow) {
+    const stored = await this.sanitizeFlowForStorage(flow);
+    this.addHistory(stored);
+  }
+
+  async emitFlowHistory(flow) {
+    const stored = await this.sanitizeFlowForStorage(flow);
+    const index = this.history.findIndex((item) => item.id === stored.id);
+    if (index >= 0) {
+      this.history[index] = stored;
+    } else {
+      this.history.unshift(stored);
+      if (this.history.length > this.config.historyLimit) {
+        this.history.length = this.config.historyLimit;
+      }
+      this.prunePersistedHistory();
+    }
+    this.emitHistory(stored);
+  }
+
+  async sanitizeFlowForStorage(flow) {
+    const stored = structuredClone(flow);
+    try {
+      await this.applyVeilCoreRequestSanitization(stored);
+      await this.sanitizeStoredVeilCoreResponse(stored);
+    } catch (error) {
+      stored.notes = Array.isArray(stored.notes) ? stored.notes : [];
+      stored.notes.push(error.message);
+      if (stored.request) {
+        stored.request.bodyText = '[Veil Core blocked request body: sanitization failed]';
+        stored.request.bodyBase64 = Buffer.from(stored.request.bodyText, 'utf8').toString('base64');
+      }
+      if (stored.response) {
+        stored.response.bodyText = '[Veil Core blocked response body: sanitization failed]';
+        stored.response.bodyBase64 = Buffer.from(stored.response.bodyText, 'utf8').toString('base64');
+      }
+    }
+    return stored;
   }
 
   persistFlow(flow) {
@@ -1503,7 +1844,7 @@ function sanitizeScopeRules(rules) {
     const rule = rawRule && typeof rawRule === 'object' ? rawRule : {};
     const action = ['include', 'exclude'].includes(rule.action) ? rule.action : 'include';
     const field = ['url', 'host', 'path', 'method'].includes(rule.field) ? rule.field : 'url';
-    const operator = ['contains', 'equals', 'startsWith', 'endsWith', 'regex', 'exists'].includes(rule.operator)
+    const operator = ['contains', 'equals', 'startsWith', 'endsWith', 'regex', 'exists', 'domain', 'domainSubdomains'].includes(rule.operator)
       ? rule.operator
       : 'contains';
 
@@ -1528,6 +1869,7 @@ function sanitizeMcp(mcp) {
     requireScope: raw.requireScope === true,
     activeTesting: raw.activeTesting === true,
     anonymization: sanitizeMcpAnonymization(raw.anonymization),
+    veilCore: sanitizeMcpVeilCore(raw.veilCore),
   };
 }
 
@@ -1554,6 +1896,60 @@ function sanitizeMcpAnonymization(value) {
     redactPlatformHeaders: boolOrDefault(raw.redactPlatformHeaders, profiled.redactPlatformHeaders),
     maxBodyChars: clampNumber(raw.maxBodyChars, 4096, 2 * 1024 * 1024, profiled.maxBodyChars),
   };
+}
+
+function sanitizeMcpVeilCore(value) {
+  const raw = value && typeof value === 'object' ? value : {};
+  const socketPath = String(raw.socketPath || process.env.VEIL_CORE_SOCKET || '/run/veil/veil.sock').slice(0, 1000);
+  const scopeId = String(raw.scopeId || process.env.VEIL_CORE_SCOPE_ID || 'veil-proxy-default')
+    .replace(/[^\w:.-]+/g, '-')
+    .slice(0, 160) || 'veil-proxy-default';
+  const caller = String(raw.caller || 'veil-proxy').replace(/[^\w:.-]+/g, '-').slice(0, 120) || 'veil-proxy';
+  const policyMode = String(raw.policyMode || 'default').replace(/[^\w:.-]+/g, '-').slice(0, 80) || 'default';
+  return {
+    enabled: raw.enabled === true || process.env.VEIL_CORE_ENABLED === '1',
+    socketPath,
+    scopeId,
+    caller,
+    policyMode,
+    autoCreateScope: raw.autoCreateScope !== false,
+    fallbackOnError: raw.fallbackOnError !== false,
+    ensureDefaultPolicies: raw.ensureDefaultPolicies !== false,
+    cacheEntries: clampNumber(raw.cacheEntries, 0, 10000, 1000),
+  };
+}
+
+function sanitizeVeilCore(value) {
+  const normalized = sanitizeMcpVeilCore(value);
+  const raw = value && typeof value === 'object' ? value : {};
+  return {
+    ...normalized,
+    sanitizeResponses: raw.sanitizeResponses !== false,
+    rehydrateRequests: raw.rehydrateRequests !== false,
+    auditTraffic: raw.auditTraffic !== false,
+  };
+}
+
+function canRewriteHttpBody(headers = {}) {
+  const encoding = headerValue(headers, 'content-encoding').trim().toLowerCase();
+  return !encoding || encoding === 'identity';
+}
+
+function isVeilCoreTextContent(headers = {}) {
+  const contentType = headerValue(headers, 'content-type').split(';', 1)[0].trim().toLowerCase();
+  if (!contentType) {
+    return false;
+  }
+  if (contentType.startsWith('text/')) {
+    return true;
+  }
+  return [
+    'application/json',
+    'application/x-www-form-urlencoded',
+    'application/xml',
+    'application/graphql',
+    'application/javascript',
+  ].includes(contentType) || contentType.endsWith('+json') || contentType.endsWith('+xml');
 }
 
 function anonymizationProfileOptions(profile) {
@@ -2393,6 +2789,35 @@ function payloadAttackSummary(record) {
     delayMillis: record.delayMillis,
     statusCodes: record.statusCodes || {},
   };
+}
+
+function activeScanSummary(record) {
+  return {
+    id: record.id,
+    sourceId: record.sourceId,
+    sourceMethod: record.sourceMethod,
+    sourceUrl: record.sourceUrl,
+    sourceHost: record.sourceHost,
+    sourcePath: record.sourcePath,
+    templateIds: record.templateIds || [],
+    maxRequests: record.maxRequests,
+    concurrency: record.concurrency,
+    requested: record.requested || 0,
+    executed: record.executed || 0,
+    matched: record.matched || 0,
+    findingIds: record.findingIds || [],
+    resultCount: record.resultCount || 0,
+    status: record.status,
+    error: record.error || '',
+    startedAt: record.startedAt,
+    completedAt: record.completedAt,
+    durationMs: record.completedAt ? Number(record.completedAt) - Number(record.startedAt || record.completedAt) : Date.now() - Number(record.startedAt || Date.now()),
+  };
+}
+
+function normalizeActiveScanNumber(value, fallback) {
+  const number = Number.parseInt(value, 10);
+  return Number.isFinite(number) ? number : fallback;
 }
 
 function sanitizeReportedFindings(value) {

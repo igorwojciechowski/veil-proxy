@@ -8,6 +8,9 @@ const state = {
   mcp: null,
   history: [],
   findings: [],
+  activeScans: [],
+  selectedActiveScanId: null,
+  selectedActiveScan: null,
   sentTraffic: [],
   mcpExchanges: [],
   mcpSecrets: [],
@@ -75,6 +78,7 @@ const state = {
   globalSearchError: '',
   findingsSearch: '',
   findingsSeverity: '',
+  findingsSource: '',
   selectedSentTrafficId: null,
   selectedSentTraffic: null,
   payloadAttacks: [],
@@ -110,6 +114,7 @@ const state = {
   contextFlowId: null,
   contextTarget: null,
   rulesModalStage: 'request',
+  sidebarCollapsed: false,
 };
 
 const el = {
@@ -119,6 +124,7 @@ const el = {
   findingsCount: document.querySelector('#findingsCount'),
   upstreamStatus: document.querySelector('#upstreamStatus'),
   proxyAddress: document.querySelector('#proxyAddress'),
+  sidebarToggleBtn: document.querySelector('#sidebarToggleBtn'),
   mcpPanels: document.querySelector('#mcpPanels'),
   requestInterceptToggle: document.querySelector('#requestInterceptToggle'),
   responseInterceptToggle: document.querySelector('#responseInterceptToggle'),
@@ -162,8 +168,19 @@ const el = {
   findingsSubtitle: document.querySelector('#findingsSubtitle'),
   findingsSearch: document.querySelector('#findingsSearch'),
   findingsSeverityFilter: document.querySelector('#findingsSeverityFilter'),
+  findingsSourceFilter: document.querySelector('#findingsSourceFilter'),
   findingsList: document.querySelector('#findingsList'),
   refreshFindingsBtn: document.querySelector('#refreshFindingsBtn'),
+  activeScansSubtitle: document.querySelector('#activeScansSubtitle'),
+  refreshActiveScansBtn: document.querySelector('#refreshActiveScansBtn'),
+  activeScanRows: document.querySelector('#activeScanRows'),
+  emptyActiveScanDetail: document.querySelector('#emptyActiveScanDetail'),
+  activeScanDetail: document.querySelector('#activeScanDetail'),
+  activeScanStatus: document.querySelector('#activeScanStatus'),
+  activeScanTitle: document.querySelector('#activeScanTitle'),
+  activeScanSourceBtn: document.querySelector('#activeScanSourceBtn'),
+  activeScanMeta: document.querySelector('#activeScanMeta'),
+  activeScanResultRows: document.querySelector('#activeScanResultRows'),
   sentTrafficSubtitle: document.querySelector('#sentTrafficSubtitle'),
   sentTrafficRows: document.querySelector('#sentTrafficRows'),
   clearSentTrafficBtn: document.querySelector('#clearSentTrafficBtn'),
@@ -315,10 +332,12 @@ const el = {
   saveProxyBtn: document.querySelector('#saveProxyBtn'),
   proxySaveStatus: document.querySelector('#proxySaveStatus'),
   mcpEnabledToggle: document.querySelector('#mcpEnabledToggle'),
+  mcpHost: document.querySelector('#mcpHost'),
   mcpPort: document.querySelector('#mcpPort'),
   mcpToken: document.querySelector('#mcpToken'),
   mcpRequireScopeToggle: document.querySelector('#mcpRequireScopeToggle'),
   mcpActiveTestingToggle: document.querySelector('#mcpActiveTestingToggle'),
+  mcpVeilModeToggle: document.querySelector('#mcpVeilModeToggle'),
   saveMcpBtn: document.querySelector('#saveMcpBtn'),
   mcpEndpoint: document.querySelector('#mcpEndpoint'),
   mcpStatus: document.querySelector('#mcpStatus'),
@@ -462,6 +481,8 @@ async function init() {
 
 function bindUi() {
   bindDesktopProjectCommands();
+  restoreSidebarState();
+  el.sidebarToggleBtn?.addEventListener('click', toggleSidebar);
   setupMcpWorkspace();
 
   document.querySelectorAll('.nav-item').forEach((button) => {
@@ -517,8 +538,8 @@ function bindUi() {
   el.resetTrafficFiltersBtn.addEventListener('click', resetTrafficFilters);
   el.trafficHorizontalLayoutBtn.addEventListener('click', () => setTrafficLayout({ orientation: 'horizontal' }));
   el.trafficVerticalLayoutBtn.addEventListener('click', () => setTrafficLayout({ orientation: 'vertical' }));
-  el.showTrafficListToggle.addEventListener('change', () => setTrafficLayout({ showList: el.showTrafficListToggle.checked }));
-  el.showTrafficDetailToggle.addEventListener('change', () => setTrafficLayout({ showDetail: el.showTrafficDetailToggle.checked }));
+  el.showTrafficListToggle.addEventListener('click', () => setTrafficLayout({ showList: !state.trafficLayout.showList }));
+  el.showTrafficDetailToggle.addEventListener('click', () => setTrafficLayout({ showDetail: !state.trafficLayout.showDetail }));
   el.trafficPaneResizer.addEventListener('mousedown', startTrafficPaneResize);
   el.trafficTableWrap.addEventListener('scroll', () => {
     state.virtual.traffic.scrollTop = el.trafficTableWrap.scrollTop;
@@ -598,6 +619,28 @@ function bindUi() {
     state.findingsSeverity = el.findingsSeverityFilter.value;
     renderFindings();
   });
+  el.findingsSourceFilter?.addEventListener('change', () => {
+    state.findingsSource = el.findingsSourceFilter.value;
+    renderFindings();
+  });
+  el.refreshActiveScansBtn?.addEventListener('click', () => loadActiveScans());
+  el.activeScanRows?.addEventListener('click', async (event) => {
+    const actionButton = event.target.closest('[data-active-scan-action]');
+    if (actionButton) {
+      await activeScanAction(actionButton.dataset.activeScanId, actionButton.dataset.activeScanAction);
+      return;
+    }
+    const row = event.target.closest('[data-active-scan-id]');
+    if (row) {
+      await loadActiveScan(row.dataset.activeScanId);
+    }
+  });
+  el.activeScanSourceBtn?.addEventListener('click', async () => {
+    const sourceId = state.selectedActiveScan?.sourceId;
+    if (!sourceId) return;
+    await loadFlow(sourceId);
+    setView('traffic');
+  });
   el.sentTrafficRows?.addEventListener('click', async (event) => {
     const row = event.target.closest('[data-sent-traffic-id]');
     if (!row) return;
@@ -666,7 +709,7 @@ function bindUi() {
     patchConfig({ intercept: { responses: el.responseInterceptToggle.checked } });
   });
 
-  [el.proxyHost, el.proxyPort, el.mcpPort, el.mcpToken].forEach((input) => {
+  [el.proxyHost, el.proxyPort, el.mcpHost, el.mcpPort, el.mcpToken].forEach((input) => {
     input?.addEventListener('input', syncProxyDraftFromDom);
   });
   el.saveConfigBtn.addEventListener('click', () => {
@@ -731,6 +774,9 @@ function bindUi() {
       el.mcpStatus.textContent = 'Cannot enable MCP: scope is not configured. Add an enabled include rule in Scope first.';
       el.mcpEndpoint.textContent = 'MCP disabled';
     }
+  });
+  el.mcpVeilModeToggle?.addEventListener('change', () => {
+    syncMcpVeilModeVisual(el.mcpVeilModeToggle.checked);
   });
   el.saveAnonymizationBtn?.addEventListener('click', saveAnonymizationConfig);
   el.anonymizationProfile?.addEventListener('change', applyAnonymizationProfileDraft);
@@ -825,6 +871,26 @@ function bindUi() {
   });
 }
 
+function restoreSidebarState() {
+  state.sidebarCollapsed = localStorage.getItem('veilProxy.sidebarCollapsed') === '1';
+  renderSidebarState();
+}
+
+function toggleSidebar() {
+  state.sidebarCollapsed = !state.sidebarCollapsed;
+  localStorage.setItem('veilProxy.sidebarCollapsed', state.sidebarCollapsed ? '1' : '0');
+  renderSidebarState();
+}
+
+function renderSidebarState() {
+  document.documentElement.classList.toggle('sidebar-collapsed', state.sidebarCollapsed === true);
+  if (!el.sidebarToggleBtn) return;
+  el.sidebarToggleBtn.setAttribute('aria-pressed', state.sidebarCollapsed ? 'true' : 'false');
+  el.sidebarToggleBtn.setAttribute('aria-label', state.sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar');
+  el.sidebarToggleBtn.title = state.sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar';
+  el.sidebarToggleBtn.textContent = state.sidebarCollapsed ? '»' : '☰';
+}
+
 function setupMcpWorkspace() {
   if (!el.mcpPanels || el.mcpPanels.dataset.ready === 'true') return;
   for (const id of MCP_PANEL_IDS) {
@@ -880,6 +946,14 @@ function openEvents() {
     payloadAttacksView?.render();
     markProjectDirty();
   });
+  events.addEventListener('active-scans', (event) => {
+    state.activeScans = JSON.parse(event.data);
+    if (!state.activeScans.some((item) => item.id === state.selectedActiveScanId)) {
+      state.selectedActiveScanId = null;
+      state.selectedActiveScan = null;
+    }
+    renderActiveScans();
+  });
   events.addEventListener('mcp-exchanges', (event) => {
     state.mcpExchanges = JSON.parse(event.data);
     if (!state.mcpExchanges.some((item) => item.id === state.selectedMcpExchangeId)) {
@@ -914,6 +988,7 @@ function applyState(payload, forceUi = false, options = {}) {
   state.history = payload.history || [];
   state.sentTraffic = payload.sentTraffic || [];
   state.payloadAttacks = payload.payloadAttacks || [];
+  state.activeScans = payload.activeScans || [];
   state.mcpExchanges = payload.mcpExchanges || [];
   state.mcpSecrets = payload.mcpSecrets || [];
   state.pending = payload.pending || [];
@@ -979,6 +1054,7 @@ function renderAll(options = {}) {
   renderSiteMap();
   renderGlobalSearch();
   renderFindings();
+  renderActiveScans();
   renderSentTraffic();
   payloadAttacksView?.render();
   renderMcpLog();
@@ -1506,10 +1582,17 @@ function renderMcpConfig() {
   const config = state.config.mcp || {};
   const runtime = state.mcp || {};
   el.mcpEnabledToggle.checked = config.enabled === true;
+  if (el.mcpHost) {
+    el.mcpHost.value = runtime.host || config.host || '127.0.0.1';
+  }
   el.mcpPort.value = runtime.port || config.port || 8765;
   el.mcpToken.value = runtime.token || config.token || '';
   el.mcpRequireScopeToggle.checked = config.requireScope === true;
   el.mcpActiveTestingToggle.checked = config.activeTesting === true;
+  if (el.mcpVeilModeToggle) {
+    el.mcpVeilModeToggle.checked = config.veilCore?.enabled === true;
+  }
+  syncMcpVeilModeVisual(config.veilCore?.enabled === true);
   if (runtime.running) {
     el.mcpEndpoint.textContent = runtime.endpoint;
     el.mcpStatus.textContent = `Running. Use Authorization: Bearer ${runtime.token}`;
@@ -1521,8 +1604,12 @@ function renderMcpConfig() {
     el.mcpStatus.textContent = 'Set an enabled include scope rule before enabling MCP.';
   } else {
     el.mcpEndpoint.textContent = 'MCP disabled';
-    el.mcpStatus.textContent = 'MCP returns anonymized data only. Real secret values are never returned.';
+    el.mcpStatus.textContent = 'Local operator views stay raw. Enable Veil Mode to anonymize MCP responses through veil-core.';
   }
+}
+
+function syncMcpVeilModeVisual(enabled) {
+  document.documentElement.classList.toggle('mcp-veil-mode', enabled === true);
 }
 
 function hasConfiguredMcpScope() {
@@ -2342,8 +2429,12 @@ function renderTrafficLayout() {
   el.trafficSplit.style.setProperty('--traffic-detail-size', `${100 - split}%`);
   el.trafficHorizontalLayoutBtn.classList.toggle('active', layout.orientation === 'horizontal');
   el.trafficVerticalLayoutBtn.classList.toggle('active', layout.orientation === 'vertical');
-  el.showTrafficListToggle.checked = layout.showList;
-  el.showTrafficDetailToggle.checked = layout.showDetail;
+  el.trafficHorizontalLayoutBtn.setAttribute('aria-pressed', layout.orientation === 'horizontal' ? 'true' : 'false');
+  el.trafficVerticalLayoutBtn.setAttribute('aria-pressed', layout.orientation === 'vertical' ? 'true' : 'false');
+  el.showTrafficListToggle.classList.toggle('active', layout.showList);
+  el.showTrafficDetailToggle.classList.toggle('active', layout.showDetail);
+  el.showTrafficListToggle.setAttribute('aria-pressed', layout.showList ? 'true' : 'false');
+  el.showTrafficDetailToggle.setAttribute('aria-pressed', layout.showDetail ? 'true' : 'false');
 }
 
 function startTrafficPaneResize(event) {
@@ -2373,6 +2464,37 @@ async function loadSiteMap() {
   renderSiteMap();
 }
 
+async function loadActiveScans() {
+  state.activeScans = await api('/api/scanner/active');
+  renderActiveScans();
+}
+
+async function loadActiveScan(id) {
+  state.selectedActiveScanId = id;
+  state.selectedActiveScan = await api(`/api/scanner/active/${encodeURIComponent(id)}`);
+  renderActiveScans();
+}
+
+async function activeScanAction(id, action) {
+  if (action === 'delete') {
+    await api(`/api/scanner/active/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (state.selectedActiveScanId === id) {
+      state.selectedActiveScanId = null;
+      state.selectedActiveScan = null;
+    }
+  } else {
+    await api(`/api/scanner/active/${encodeURIComponent(id)}/${encodeURIComponent(action)}`, { method: 'POST' });
+  }
+  await loadActiveScans();
+  if (state.selectedActiveScanId) {
+    await loadActiveScan(state.selectedActiveScanId).catch(() => {
+      state.selectedActiveScanId = null;
+      state.selectedActiveScan = null;
+      renderActiveScans();
+    });
+  }
+}
+
 function scheduleSiteMapLoad() {
   clearTimeout(siteMapLoadTimer);
   siteMapLoadTimer = setTimeout(() => {
@@ -2394,18 +2516,20 @@ function scheduleFindingsLoad() {
 }
 
 async function refreshHistoryAndSiteMap() {
-  const [history, siteMap, findings, sentTraffic, payloadAttacks] = await Promise.all([
+  const [history, siteMap, findings, sentTraffic, payloadAttacks, activeScans] = await Promise.all([
     api('/api/history'),
     api('/api/site-map'),
     api('/api/findings'),
     api('/api/sent-traffic'),
     api('/api/payload-attacks'),
+    api('/api/scanner/active'),
   ]);
   state.history = history;
   state.siteMap = siteMap;
   state.findings = findings;
   state.sentTraffic = sentTraffic;
   state.payloadAttacks = payloadAttacks;
+  state.activeScans = activeScans;
 }
 
 function renderSiteMap() {
@@ -2634,12 +2758,16 @@ function renderFindings() {
   if (!el.findingsList) return;
   const findings = filteredFindings();
   el.findingsSeverityFilter.value = state.findingsSeverity;
-  el.findingsSubtitle.textContent = `${findings.length} shown of ${state.findings.length} passive findings`;
+  if (el.findingsSourceFilter) {
+    el.findingsSourceFilter.value = state.findingsSource;
+  }
+  el.findingsSubtitle.textContent = `${findings.length} shown of ${state.findings.length} findings`;
   el.findingsList.innerHTML =
     findings
-      .map(
-        (finding) => `
-          <article class="finding-card finding-${escapeHtml(finding.severity)}">
+      .map((finding) => {
+        const source = findingSourceMeta(finding);
+        return `
+          <article class="finding-card finding-${escapeHtml(finding.severity)}" data-finding-card-id="${escapeHtml(finding.id)}">
             <div class="finding-main">
               <span class="severity-pill severity-${escapeHtml(finding.severity)}">${escapeHtml(finding.severity)}</span>
               <div>
@@ -2648,6 +2776,7 @@ function renderFindings() {
               </div>
             </div>
             <div class="finding-meta">
+              <span class="source-chip source-${escapeHtml(source.key)}" title="${escapeHtml(source.title)}">${escapeHtml(source.label)}</span>
               <span title="${escapeHtml(finding.host || '')}">${escapeHtml(finding.host || '-')}</span>
               <span title="${escapeHtml(finding.path || '')}">${escapeHtml(finding.path || '/')}</span>
               <span>${escapeHtml(String(finding.count || 1))} hits</span>
@@ -2657,14 +2786,18 @@ function renderFindings() {
               ${(finding.evidence || []).map((item) => `<code>${escapeHtml(item)}</code>`).join('')}
             </div>
             <div class="finding-actions">
+              ${(finding.sentTrafficId || (finding.flowIds || []).length)
+                ? `<button class="button ghost compact-button" type="button" data-finding-preview-id="${escapeHtml(finding.id)}">Preview evidence</button>`
+                : ''}
               ${(finding.flowIds || [])
                 .slice(0, 5)
                 .map((flowId) => `<button class="button ghost compact-button" type="button" data-finding-flow-id="${escapeHtml(flowId)}">#${escapeHtml(flowId)}</button>`)
                 .join('')}
             </div>
+            <div class="finding-preview hidden" data-finding-preview></div>
           </article>
-        `,
-      )
+        `;
+      })
       .join('') || '<div class="empty-state">No findings match current filters</div>';
 
   el.findingsList.querySelectorAll('[data-finding-flow-id]').forEach((button) => {
@@ -2673,12 +2806,63 @@ function renderFindings() {
       setView('traffic');
     });
   });
+  el.findingsList.querySelectorAll('[data-finding-preview-id]').forEach((button) => {
+    button.addEventListener('click', async () => previewFindingEvidence(button.dataset.findingPreviewId));
+  });
+}
+
+async function previewFindingEvidence(findingId) {
+  const finding = state.findings.find((item) => item.id === findingId);
+  const flowIds = (finding?.flowIds || []).filter(Boolean);
+  const source = finding ? findingSourceMeta(finding) : null;
+  const flowId = finding?.sentTrafficId || (source?.key === 'active' ? flowIds.at(-1) : flowIds[0]);
+  if (!finding || !flowId) return;
+  const card = el.findingsList.querySelector(`[data-finding-card-id="${cssEscape(findingId)}"]`);
+  const container = card?.querySelector('[data-finding-preview]');
+  if (!container) return;
+  container.classList.remove('hidden');
+  container.textContent = 'Loading evidence...';
+  try {
+    let request = null;
+    let response = null;
+    if (finding.sentTrafficId) {
+      const sent = await api(`/api/sent-traffic/${encodeURIComponent(finding.sentTrafficId)}`);
+      request = sent.request ? buildRawRequest({ request: sent.request }) : '';
+      response = sent.response ? buildRawResponse({ response: sent.response }) : '';
+    } else {
+      const flow = await api(`/api/history/${encodeURIComponent(flowId)}`);
+      request = buildRawRequest(flow);
+      response = flow.response ? buildRawResponse(flow.response) : '';
+    }
+    container.innerHTML = `
+      <div class="finding-preview-grid">
+        <section>
+          <div class="raw-toolbar"><span>Request evidence</span></div>
+          <pre class="raw-code http-code">${escapeHtml(request || 'No request evidence')}</pre>
+        </section>
+        <section>
+          <div class="raw-toolbar"><span>Response evidence</span></div>
+          <pre class="raw-code http-code">${escapeHtml(response || 'No response evidence')}</pre>
+        </section>
+      </div>
+    `;
+  } catch (error) {
+    container.textContent = `Could not load evidence: ${formatError(error)}`;
+  }
+}
+
+function cssEscape(value) {
+  if (window.CSS && typeof window.CSS.escape === 'function') {
+    return window.CSS.escape(String(value));
+  }
+  return String(value).replace(/["\\]/g, '\\$&');
 }
 
 function filteredFindings() {
   const query = state.findingsSearch;
   return state.findings.filter((finding) => {
     if (state.findingsSeverity && finding.severity !== state.findingsSeverity) return false;
+    if (state.findingsSource && findingSourceMeta(finding).key !== state.findingsSource) return false;
     if (!query) return true;
     const haystack = [
       finding.severity,
@@ -2687,12 +2871,122 @@ function filteredFindings() {
       finding.host,
       finding.path,
       finding.url,
+      findingSourceMeta(finding).label,
       ...(finding.evidence || []),
     ]
       .join(' ')
       .toLowerCase();
     return haystack.includes(query);
   });
+}
+
+function findingSourceMeta(finding = {}) {
+  const source = String(finding.source || '').toLowerCase();
+  const evidenceSource = String(finding.evidenceSource || '').toLowerCase();
+  const id = String(finding.id || '').toLowerCase();
+  if (source === 'mcp' || id.startsWith('mcp:')) {
+    return { key: 'mcp', label: 'MCP', title: 'MCP reported finding' };
+  }
+  if (
+    evidenceSource === 'active_scan' ||
+    evidenceSource === 'payload_attack' ||
+    id.startsWith('scanner-active:') ||
+    source === 'active' ||
+    source === 'attacks'
+  ) {
+    return { key: 'active', label: 'Active', title: 'Active testing finding' };
+  }
+  return { key: 'passive', label: 'Passive', title: 'Passive scan finding' };
+}
+
+function renderActiveScans() {
+  if (!el.activeScanRows) return;
+  const scans = Array.isArray(state.activeScans) ? state.activeScans : [];
+  el.activeScansSubtitle.textContent = `${scans.length} ${scans.length === 1 ? 'run' : 'runs'}`;
+  el.activeScanRows.innerHTML =
+    scans
+      .map((scan) => {
+        const selected = scan.id === state.selectedActiveScanId ? 'selected' : '';
+        const progress = `${scan.executed || 0}/${scan.requested || scan.maxRequests || 0}`;
+        return `
+          <tr class="${selected}" data-active-scan-id="${escapeHtml(scan.id)}">
+            <td class="flow-id-cell" title="${escapeHtml(scan.id)}">${escapeHtml(shortScanId(scan.id))}</td>
+            <td><span class="status-pill ${activeScanStatusClass(scan.status)}">${escapeHtml(scan.status || '-')}</span></td>
+            <td title="${escapeHtml(scan.sourceUrl || '')}">
+              <span class="method-pill">${escapeHtml(scan.sourceMethod || '-')}</span>
+              ${escapeHtml(scan.sourceHost || '-')}${escapeHtml(scan.sourcePath || '/')}
+            </td>
+            <td>${escapeHtml(progress)}</td>
+            <td>${escapeHtml(String(scan.findingIds?.length || scan.matched || 0))}</td>
+            <td>${escapeHtml(scan.completedAt ? `${scan.durationMs}ms` : timeAgo(scan.startedAt || Date.now()))}</td>
+            <td>
+              <div class="button-row active-scan-actions">
+                ${scan.status === 'running' ? `<button class="button ghost compact-button" type="button" data-active-scan-id="${escapeHtml(scan.id)}" data-active-scan-action="pause">Pause</button>` : ''}
+                ${scan.status === 'paused' ? `<button class="button ghost compact-button" type="button" data-active-scan-id="${escapeHtml(scan.id)}" data-active-scan-action="resume">Resume</button>` : ''}
+                ${['running', 'paused', 'queued', 'stopping'].includes(scan.status) ? `<button class="button ghost compact-button" type="button" data-active-scan-id="${escapeHtml(scan.id)}" data-active-scan-action="stop">Stop</button>` : ''}
+                <button class="button ghost compact-button" type="button" data-active-scan-id="${escapeHtml(scan.id)}" data-active-scan-action="delete">Delete</button>
+              </div>
+            </td>
+          </tr>
+        `;
+      })
+      .join('') || '<tr><td colspan="7"><div class="empty-state compact-empty">No active scans yet</div></td></tr>';
+  renderActiveScanDetail();
+}
+
+function renderActiveScanDetail() {
+  if (!el.activeScanDetail) return;
+  const scan = state.selectedActiveScan;
+  if (!scan) {
+    el.emptyActiveScanDetail.classList.remove('hidden');
+    el.activeScanDetail.classList.add('hidden');
+    return;
+  }
+  el.emptyActiveScanDetail.classList.add('hidden');
+  el.activeScanDetail.classList.remove('hidden');
+  el.activeScanStatus.textContent = scan.status || '-';
+  el.activeScanStatus.className = `status-pill ${activeScanStatusClass(scan.status)}`;
+  el.activeScanTitle.textContent = `${scan.sourceMethod || '-'} ${scan.sourceUrl || scan.sourceId || ''}`;
+  el.activeScanMeta.textContent = JSON.stringify(
+    {
+      id: scan.id,
+      sourceId: scan.sourceId,
+      templates: scan.templateIds,
+      requested: scan.requested,
+      executed: scan.executed,
+      matched: scan.matched,
+      findings: scan.findingIds,
+      startedAt: scan.startedAt,
+      completedAt: scan.completedAt,
+      error: scan.error || undefined,
+    },
+    null,
+    2,
+  );
+  el.activeScanResultRows.innerHTML =
+    (scan.results || [])
+      .map((result) => `
+        <tr>
+          <td>${escapeHtml(String(result.index ?? '-'))}</td>
+          <td>${escapeHtml(result.templateId || '-')}</td>
+          <td>${escapeHtml(result.insertionPoint ? `${result.insertionPoint.type}:${result.insertionPoint.name}` : '-')}</td>
+          <td><span class="status-pill ${result.error ? 'error' : ''}">${escapeHtml(String(result.statusCode || result.error || '-'))}</span></td>
+          <td>${result.findingId ? escapeHtml(result.findingId) : '-'}</td>
+          <td>${escapeHtml(String(result.durationMs ?? '-'))}ms</td>
+        </tr>
+      `)
+      .join('') || '<tr><td colspan="6"><div class="empty-state compact-empty">No results yet</div></td></tr>';
+}
+
+function shortScanId(id) {
+  const match = String(id || '').match(/^active-(.+)-(\d+)$/);
+  return match ? `#${match[1]}` : String(id || '-').slice(0, 16);
+}
+
+function activeScanStatusClass(status) {
+  if (status === 'error' || status === 'stopped') return 'error';
+  if (status === 'completed') return '';
+  return 'pending';
 }
 
 function renderSentTraffic() {
@@ -3731,8 +4025,7 @@ async function sendFlowToAttack(flowId) {
 }
 
 async function runActiveScan(flowId) {
-  setView('findings');
-  el.findingsSubtitle.textContent = `Active scan running for req #${flowId}...`;
+  setView('activeScans');
   const result = await api('/api/scanner/active/run', {
     method: 'POST',
     headers: {
@@ -3740,12 +4033,14 @@ async function runActiveScan(flowId) {
     },
     body: JSON.stringify({
       id: flowId,
+      async: true,
       maxRequests: 60,
       concurrency: 3,
     }),
   });
-  await loadFindings();
-  el.findingsSubtitle.textContent = `Active scan finished: ${result.executed} checks, ${result.findings.length} findings`;
+  state.selectedActiveScanId = result.id;
+  await loadActiveScans();
+  await loadActiveScan(result.id);
 }
 
 function createEchoTab(request, title, source = 'Editable request') {
@@ -4701,7 +4996,7 @@ async function copyTargetText(button) {
   }
 
   const previous = button.textContent;
-  button.textContent = 'Copied';
+  button.textContent = button.classList.contains('copy-icon-button') ? '✓' : 'Copied';
   setTimeout(() => {
     button.textContent = previous;
   }, 900);
@@ -5349,7 +5644,12 @@ async function saveProxyConfig() {
 }
 
 async function saveMcpConfig() {
+  const host = String(el.mcpHost?.value || '127.0.0.1').trim() || '127.0.0.1';
   const port = Number(el.mcpPort.value);
+  if (!['127.0.0.1', 'localhost', '::1'].includes(host)) {
+    el.mcpStatus.textContent = 'MCP host must be loopback: 127.0.0.1, localhost, or ::1.';
+    return;
+  }
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
     el.mcpStatus.textContent = 'MCP port must be between 0 and 65535.';
     return;
@@ -5367,11 +5667,15 @@ async function saveMcpConfig() {
       mcp: {
         ...(state.config.mcp || {}),
         enabled: el.mcpEnabledToggle.checked,
-        host: '127.0.0.1',
+        host,
         port,
         token: el.mcpToken.value.trim(),
         requireScope: el.mcpRequireScopeToggle.checked,
         activeTesting: el.mcpActiveTestingToggle.checked,
+        veilCore: {
+          ...((state.config.mcp || {}).veilCore || {}),
+          enabled: el.mcpVeilModeToggle?.checked === true,
+        },
       },
     });
     const payload = await api('/api/state');
@@ -6044,6 +6348,7 @@ function setView(view) {
     siteMap: 'Site Map',
     findings: 'Findings',
     attacks: 'Fuzzer',
+    activeScans: 'Active Scans',
     mcp: 'MCP',
     scope: 'Scope',
     echo: 'Relay',

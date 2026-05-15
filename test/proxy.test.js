@@ -628,6 +628,39 @@ test('intercepts and inspects HTTPS requests inside CONNECT tunnels', async () =
   }
 });
 
+test('handles aborted HTTPS MITM handshakes without crashing the proxy', async () => {
+  const certDir = fs.mkdtempSync(path.join(os.tmpdir(), 'veil-proxy-test-ca-'));
+  const app = createApp({
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+      https: {
+        intercept: true,
+        interceptPorts: [443],
+        certDir,
+        ignoreUpstreamCertificateErrors: true,
+      },
+    },
+  });
+
+  await app.start();
+
+  try {
+    const socket = net.connect({ host: '127.0.0.1', port: app.proxy.port });
+    await once(socket, 'connect');
+    socket.write('CONNECT example.test:443 HTTP/1.1\r\nHost: example.test:443\r\n\r\n');
+    const { head } = await readUntil(socket, '\r\n\r\n');
+    assert.match(head.toString('latin1'), /^HTTP\/1\.1 200 /);
+    socket.write('not a tls handshake');
+    socket.destroy();
+
+    const flow = await waitFor(() => app.proxy.listHistory().find((item) => item.type === 'connect'));
+    assert.equal(flow.host, 'example.test');
+  } finally {
+    await app.stop();
+  }
+});
+
 test('rebinds the proxy listener when proxy port changes', async () => {
   const origin = await createOriginServer();
   const app = createApp({
@@ -751,6 +784,11 @@ test('scope rules support domain presets and path prefixes', async () => {
   await app.start();
 
   try {
+    const config = app.proxy.getConfig();
+    const domainRule = config.scope.rules.find((rule) => rule.id === 'include-local-domain');
+    assert.equal(domainRule.operator, 'domain');
+    assert.equal(domainRule.field, 'host');
+
     for (const path of ['/api/items', '/admin/panel']) {
       const target = `http://127.0.0.1:${origin.port}${path}`;
       const response = await proxyRequest(app.proxy.port, {
@@ -938,6 +976,382 @@ test('serves MCP tool calls with anonymized HTTP output', async () => {
     assert.equal(response.result.structuredContent.rawTrafficReturned, undefined);
   } finally {
     await app.stop();
+  }
+});
+
+test('MCP anonymize_http can use veil-core over Unix socket', async () => {
+  const fakeCore = await createFakeVeilCoreServer((path, body) => {
+    if (path === '/scopes') {
+      return { scope_id: body.scope_id, created: true };
+    }
+    if (path === '/policies') {
+      return { scope_id: body.scope_id, created: true };
+    }
+    if (path === '/sanitize_text') {
+      assert.equal(body.scope_id, 'proxy-scope');
+      assert.equal(body.caller, 'veil-proxy');
+      assert.equal(body.purpose, 'mcp_response');
+      return {
+        text: String(body.text)
+          .replaceAll('private.example.com', 'DOMAIN_1')
+          .replaceAll('alice@example.com', 'EMAIL_1')
+          .replaceAll('top-secret-token', 'SECRET_1'),
+        tokens: [
+          { token: 'DOMAIN_1', type: 'domain' },
+          { token: 'EMAIL_1', type: 'email' },
+          { token: 'SECRET_1', type: 'secret' },
+        ],
+      };
+    }
+    return { error: 'not_found' };
+  });
+  const app = createApp({
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+      mcp: {
+        enabled: true,
+        port: 0,
+        token: 'test-token',
+        veilCore: {
+          enabled: true,
+          socketPath: fakeCore.socketPath,
+          scopeId: 'proxy-scope',
+          autoCreateScope: true,
+          fallbackOnError: false,
+        },
+      },
+    },
+  });
+
+  await app.start();
+
+  try {
+    const response = await mcpToolCall(app, 'anonymize_http', {
+      message: 'GET /users/alice@example.com HTTP/1.1\r\nHost: private.example.com\r\nAuthorization: Bearer top-secret-token\r\n\r\n',
+    });
+    const structured = response.result.structuredContent;
+    assert.equal(structured.veilCoreUsed, true);
+    assert.equal(structured.veilCoreFallback, false);
+    assert.equal(structured.message.includes('private.example.com'), false);
+    assert.equal(structured.message.includes('alice@example.com'), false);
+    assert.equal(structured.message.includes('top-secret-token'), false);
+    assert.equal(structured.message.includes('DOMAIN_1'), true);
+    assert.equal(fakeCore.requests.some((item) => item.path === '/scopes'), true);
+    assert.equal(fakeCore.requests.some((item) => item.path === '/sanitize_text'), true);
+  } finally {
+    await app.stop();
+    await fakeCore.close();
+  }
+});
+
+test('MCP anonymize_http falls back when veil-core is unavailable by default', async () => {
+  const app = createApp({
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+      mcp: {
+        enabled: true,
+        port: 0,
+        token: 'test-token',
+        veilCore: {
+          enabled: true,
+          socketPath: path.join(os.tmpdir(), `missing-veil-core-${Date.now()}.sock`),
+          scopeId: 'proxy-scope',
+          fallbackOnError: true,
+        },
+      },
+    },
+  });
+
+  await app.start();
+
+  try {
+    const response = await mcpToolCall(app, 'anonymize_http', {
+      message: 'GET / HTTP/1.1\r\nHost: private.example.com\r\n\r\n',
+    });
+    const structured = response.result.structuredContent;
+    assert.equal(structured.veilCoreUsed, false);
+    assert.equal(structured.veilCoreFallback, true);
+    assert.equal(structured.message.includes('private.example.com'), false);
+    assert.equal(structured.message.includes('app-1.example.invalid'), true);
+  } finally {
+    await app.stop();
+  }
+});
+
+test('MCP history read tools can use veil-core without returning raw target data', async () => {
+  const origin = await createOriginServer();
+  const fakeCore = await createFakeVeilCoreServer((requestPath, body) => {
+    if (requestPath === '/scopes') {
+      return { scope_id: body.scope_id, created: true };
+    }
+    if (requestPath === '/policies') {
+      return { scope_id: body.scope_id, created: true };
+    }
+    if (requestPath === '/sanitize_text') {
+      assert.equal(body.scope_id, 'proxy-history-scope');
+      assert.equal(body.caller, 'veil-proxy');
+      assert.equal(body.purpose, 'mcp_history');
+      return {
+        text: String(body.text)
+          .replace(/127\.0\.0\.1(?::\d+)?/g, 'IP_PRIVATE_1')
+          .replaceAll('alice@example.com', 'EMAIL_1')
+          .replaceAll('top-secret-token', 'SECRET_1'),
+        tokens: [
+          { token: 'IP_PRIVATE_1', type: 'private_ip' },
+          { token: 'EMAIL_1', type: 'email' },
+          { token: 'SECRET_1', type: 'secret' },
+        ],
+      };
+    }
+    return { error: 'not_found' };
+  });
+  const app = createApp({
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+      mcp: {
+        enabled: true,
+        port: 0,
+        token: 'test-token',
+        veilCore: {
+          enabled: true,
+          socketPath: fakeCore.socketPath,
+          scopeId: 'proxy-history-scope',
+          autoCreateScope: true,
+          fallbackOnError: false,
+        },
+      },
+    },
+  });
+
+  await app.start();
+
+  try {
+    const target = `http://127.0.0.1:${origin.port}/login?email=alice@example.com&token=top-secret-token`;
+    const response = await proxyRequest(app.proxy.port, {
+      method: 'POST',
+      path: target,
+      headers: {
+        host: `127.0.0.1:${origin.port}`,
+        'content-type': 'text/plain',
+      },
+      body: 'password=top-secret-token',
+    });
+    assert.equal(response.statusCode, 200);
+
+    const history = await mcpToolCall(app, 'list_proxy_history', { limit: 10 });
+    const historyText = JSON.stringify(history);
+    assert.equal(historyText.includes('127.0.0.1'), false);
+    assert.equal(historyText.includes('alice@example.com'), false);
+    assert.equal(historyText.includes('top-secret-token'), false);
+    assert.equal(historyText.includes('IP_PRIVATE_1'), true);
+
+    const id = history.result.structuredContent.items[0].id;
+    const item = await mcpToolCall(app, 'get_proxy_item', { id });
+    const itemText = JSON.stringify(item);
+    assert.equal(item.result.structuredContent.veilCoreUsed, true);
+    assert.equal(itemText.includes('127.0.0.1'), false);
+    assert.equal(itemText.includes('alice@example.com'), false);
+    assert.equal(itemText.includes('top-secret-token'), false);
+    assert.equal(itemText.includes('IP_PRIVATE_1'), true);
+    assert.equal(fakeCore.requests.filter((record) => record.path === '/sanitize_text').length >= 2, true);
+  } finally {
+    await app.stop();
+    await fakeCore.close();
+    await origin.close();
+  }
+});
+
+test('plaintext HTTP proxy history stays raw for the local operator', async () => {
+  const observed = {};
+  const originServer = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => {
+      observed.url = req.url;
+      observed.header = req.headers['x-api-key'];
+      observed.body = Buffer.concat(chunks).toString('utf8');
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ url: req.url, header: req.headers['x-api-key'], body: observed.body }));
+    });
+  });
+  await listen(originServer, 0);
+  const origin = {
+    port: originServer.address().port,
+    close: () => close(originServer),
+  };
+  const fakeCore = await createFakeVeilCoreServer((requestPath, body) => {
+    if (requestPath === '/scopes') {
+      return { scope_id: body.scope_id, created: true };
+    }
+    if (requestPath === '/policies') {
+      assert.equal(body.purpose, 'upstream_request');
+      assert.equal(body.action, 'detokenize');
+      return { scope_id: body.scope_id, created: true };
+    }
+    if (requestPath === '/detokenize_text') {
+      assert.equal(body.scope_id, 'proxy-hot-path-scope');
+      assert.equal(body.purpose, 'upstream_request');
+      return {
+        text: String(body.text).replaceAll('SECRET_1', 'real-secret'),
+        tokens: [{ token: 'SECRET_1', type: 'secret' }],
+      };
+    }
+    if (requestPath === '/sanitize_text') {
+      assert.equal(body.scope_id, 'proxy-hot-path-scope');
+      assert.equal(['proxy_request', 'proxy_response'].includes(body.purpose), true);
+      return {
+        text: String(body.text).replaceAll('real-secret', 'SECRET_1'),
+        tokens: [{ token: 'SECRET_1', type: 'secret' }],
+      };
+    }
+    if (requestPath === '/audit_event_batch') {
+      assert.equal(body.scope_id, 'proxy-hot-path-scope');
+      return { written: Array.isArray(body.events) ? body.events.length : 0 };
+    }
+    return { error: 'not_found' };
+  });
+  const app = createApp({
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+      veilCore: {
+        enabled: true,
+        socketPath: fakeCore.socketPath,
+        scopeId: 'proxy-hot-path-scope',
+        autoCreateScope: true,
+        fallbackOnError: false,
+        sanitizeResponses: true,
+        rehydrateRequests: true,
+        auditTraffic: true,
+      },
+    },
+  });
+
+  await app.start();
+
+  try {
+    const target = `http://127.0.0.1:${origin.port}/echo?token=real-secret`;
+    const response = await proxyRequest(app.proxy.port, {
+      method: 'POST',
+      path: target,
+      headers: {
+        host: `127.0.0.1:${origin.port}`,
+        'content-type': 'text/plain',
+        'x-api-key': 'real-secret',
+      },
+      body: 'api_key=real-secret',
+    });
+
+    assert.equal(response.statusCode, 200, response.body);
+    assert.equal(observed.url, '/echo?token=real-secret');
+    assert.equal(observed.header, 'real-secret');
+    assert.equal(observed.body, 'api_key=real-secret');
+    assert.equal(response.body.includes('real-secret'), true);
+
+    const [flow] = app.proxy.listHistory();
+    assert.equal(flow.url.includes('real-secret'), true);
+    assert.equal(flow.url.includes('SECRET_1'), false);
+    const fullFlow = app.proxy.getFlow(flow.id);
+    assert.equal(fullFlow.response.bodyText.includes('real-secret'), true);
+    assert.equal(fullFlow.response.bodyText.includes('SECRET_1'), false);
+    assert.equal(fakeCore.requests.length, 0);
+  } finally {
+    await app.stop();
+    await fakeCore.close();
+    await origin.close();
+  }
+});
+
+test('HTTPS MITM proxy history stays raw for the local operator', async () => {
+  const origin = await createHttpsOriginServer();
+  const certDir = fs.mkdtempSync(path.join(os.tmpdir(), 'veil-proxy-test-ca-'));
+  const fakeCore = await createFakeVeilCoreServer((requestPath, body) => {
+    if (requestPath === '/scopes') {
+      return { scope_id: body.scope_id, created: true };
+    }
+    if (requestPath === '/policies') {
+      assert.equal(body.purpose, 'upstream_request');
+      assert.equal(body.action, 'detokenize');
+      return { scope_id: body.scope_id, created: true };
+    }
+    if (requestPath === '/sanitize_text') {
+      assert.equal(body.scope_id, 'proxy-https-scope');
+      assert.equal(['proxy_request', 'proxy_response'].includes(body.purpose), true);
+      return {
+        text: String(body.text).replaceAll('real-secret', 'SECRET_1'),
+        tokens: [{ token: 'SECRET_1', type: 'secret' }],
+      };
+    }
+    if (requestPath === '/detokenize_text') {
+      assert.equal(body.scope_id, 'proxy-https-scope');
+      assert.equal(body.purpose, 'upstream_request');
+      return {
+        text: String(body.text).replaceAll('SECRET_1', 'real-secret'),
+        tokens: [{ token: 'SECRET_1', type: 'secret' }],
+      };
+    }
+    if (requestPath === '/audit_event_batch') {
+      return { written: Array.isArray(body.events) ? body.events.length : 0 };
+    }
+    return { error: 'not_found' };
+  });
+  const app = createApp({
+    config: {
+      proxyPort: 0,
+      apiPort: 0,
+      https: {
+        intercept: true,
+        interceptPorts: [origin.port],
+        certDir,
+        ignoreUpstreamCertificateErrors: true,
+      },
+      veilCore: {
+        enabled: true,
+        socketPath: fakeCore.socketPath,
+        scopeId: 'proxy-https-scope',
+        autoCreateScope: true,
+        fallbackOnError: false,
+        sanitizeResponses: true,
+        rehydrateRequests: true,
+        auditTraffic: true,
+      },
+    },
+  });
+
+  await app.start();
+
+  try {
+    const response = await tunnelHttpsRequest(app.proxy.port, `127.0.0.1:${origin.port}`, '/secure?token=real-secret', {
+      ca: fs.readFileSync(app.proxy.certAuthority.caCertPath),
+      ALPNProtocols: ['http/1.1'],
+      method: 'POST',
+      headers: { 'content-type': 'text/plain' },
+      body: 'api_key=real-secret',
+    });
+
+    assert.match(response, /^HTTP\/1\.1 200 OK/);
+    const body = response.slice(response.indexOf('\r\n\r\n') + 4);
+    assert.equal(body.includes('real-secret'), true);
+    const parsed = JSON.parse(body);
+    assert.equal(parsed.url, '/secure?token=real-secret');
+    assert.equal(parsed.body, 'api_key=real-secret');
+
+    const flow = await waitFor(() =>
+      app.proxy.listHistory().find((item) => item.type === 'http' && item.url.includes('/secure?token=real-secret')),
+    );
+    assert.equal(flow.url.includes('SECRET_1'), false);
+    assert.equal(flow.host, `127.0.0.1:${origin.port}`);
+    const fullFlow = app.proxy.getFlow(flow.id);
+    assert.equal(fullFlow.response.bodyText.includes('real-secret'), true);
+    assert.equal(fullFlow.response.bodyText.includes('SECRET_1'), false);
+    assert.equal(fakeCore.requests.length, 0);
+  } finally {
+    await app.stop();
+    await fakeCore.close();
+    await origin.close();
   }
 });
 
@@ -2551,9 +2965,22 @@ async function tunnelHttpsRequest(proxyPort, authority, requestPath, options = {
   });
   await once(tlsSocket, 'secureConnect');
 
-  tlsSocket.write(`GET ${requestPath} HTTP/1.1\r\nHost: ${authority}\r\nConnection: close\r\n\r\n`);
-  const body = await readAll(tlsSocket);
-  return body.toString('utf8');
+  const method = String(options.method || 'GET').toUpperCase();
+  const requestBody = options.body == null ? '' : String(options.body);
+  const headers = {
+    host: authority,
+    connection: 'close',
+    ...(options.headers || {}),
+  };
+  if (requestBody) {
+    headers['content-length'] = Buffer.byteLength(requestBody);
+  }
+  const headerText = Object.entries(headers)
+    .map(([name, value]) => `${name}: ${value}`)
+    .join('\r\n');
+  tlsSocket.write(`${method} ${requestPath} HTTP/1.1\r\n${headerText}\r\n\r\n${requestBody}`);
+  const responseBody = await readAll(tlsSocket);
+  return responseBody.toString('utf8');
 }
 
 function waitFor(fn, timeoutMs = 1000) {
@@ -2689,6 +3116,61 @@ function readAll(socket, initial = Buffer.alloc(0)) {
     socket.on('data', (chunk) => chunks.push(chunk));
     socket.on('error', reject);
     socket.on('end', () => resolve(Buffer.concat(chunks)));
+  });
+}
+
+async function createFakeVeilCoreServer(handler) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'veil-core-fake-'));
+  const socketPath = path.join(dir, 'veil.sock');
+  const requests = [];
+  const server = net.createServer((socket) => {
+    const chunks = [];
+    socket.on('data', (chunk) => {
+      chunks.push(chunk);
+      const raw = Buffer.concat(chunks).toString('utf8');
+      const split = raw.indexOf('\r\n\r\n');
+      if (split === -1) return;
+      const head = raw.slice(0, split);
+      const lengthMatch = head.match(/\r\nContent-Length:\s*(\d+)/i);
+      const contentLength = lengthMatch ? Number(lengthMatch[1]) : 0;
+      const bodyText = raw.slice(split + 4);
+      if (Buffer.byteLength(bodyText) < contentLength) return;
+      const requestLine = head.split('\r\n')[0] || '';
+      const pathMatch = requestLine.match(/^[A-Z]+\s+(\S+)\s+HTTP\//);
+      const requestPath = pathMatch ? pathMatch[1] : '/';
+      const body = bodyText ? JSON.parse(bodyText.slice(0, contentLength)) : {};
+      requests.push({ path: requestPath, body });
+      const payload = handler(requestPath, body);
+      const status = payload && payload.error === 'not_found' ? 404 : 200;
+      const responseBody = Buffer.from(JSON.stringify(payload || {}));
+      socket.end([
+        `HTTP/1.1 ${status} ${status === 200 ? 'OK' : 'Not Found'}`,
+        'Content-Type: application/json',
+        `Content-Length: ${responseBody.length}`,
+        'Connection: close',
+        '',
+        '',
+      ].join('\r\n') + responseBody.toString('utf8'));
+    });
+  });
+  await listenUnix(server, socketPath);
+  return {
+    socketPath,
+    requests,
+    close: async () => {
+      await close(server);
+      fs.rmSync(dir, { recursive: true, force: true });
+    },
+  };
+}
+
+function listenUnix(server, socketPath) {
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(socketPath, () => {
+      server.off('error', reject);
+      resolve();
+    });
   });
 }
 

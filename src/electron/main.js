@@ -15,6 +15,21 @@ let recentProjects = [];
 const MAX_RECENT_PROJECTS = 8;
 const MAX_PROJECT_CHECKPOINTS = 12;
 
+process.on('uncaughtException', (error) => {
+  if (isBenignTlsCloseNotify(error)) {
+    console.warn('Ignored benign TLS close notification:', error.message);
+    return;
+  }
+  dialog.showErrorBox('Veil Proxy main process error', error && error.stack ? error.stack : String(error));
+  app.quit();
+});
+
+process.on('unhandledRejection', (reason) => {
+  if (isBenignTlsCloseNotify(reason)) {
+    console.warn('Ignored benign TLS close notification:', reason.message || reason);
+  }
+});
+
 async function createWindow() {
   app.setName('Veil Proxy');
   await loadRecentProjects();
@@ -72,6 +87,11 @@ async function createWindow() {
   });
 
   await mainWindow.loadURL(`http://127.0.0.1:${state.apiPort}?desktop=1`);
+}
+
+function isBenignTlsCloseNotify(error) {
+  const text = `${error && error.code ? error.code : ''} ${error && error.message ? error.message : ''}`;
+  return /SSLV3_ALERT_CLOSE_NOTIFY|alert close notify|ssl alert number 0/i.test(text);
 }
 
 ipcMain.handle('project:save', async (_event, request) => saveProjectFile(request, false));

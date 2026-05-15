@@ -6,12 +6,13 @@ const SECURITY_SIGNAL =
   /\b(?:SQLITE_ERROR|SQL\s+syntax|syntax\s+error|ORA-\d{4,5}|ODBC|JDBC|PostgreSQL|MySQL|MariaDB|SQLite|SQL\s+Server|MongoError|SequelizeDatabaseError|PDOException|XPathException|SAXParseException|TemplateSyntaxError|Traceback|stack\s+trace|Exception|Command\s+failed|Permission\s+denied)\b|<script\b|javascript:|onerror\s*=|onload\s*=|alert\s*\(/i;
 
 class McpTools {
-  constructor({ proxy, anonymizer, aliasVault, secretVault, controlledPayloads, configProvider }) {
+  constructor({ proxy, anonymizer, aliasVault, secretVault, controlledPayloads, veilCore, configProvider }) {
     this.proxy = proxy;
     this.anonymizer = anonymizer;
     this.aliasVault = aliasVault;
     this.secretVault = secretVault;
     this.controlledPayloads = controlledPayloads;
+    this.veilCore = veilCore || null;
     this.configProvider = configProvider;
     this.sentTraffic = [];
     this.uiStateAccess = null;
@@ -258,7 +259,7 @@ class McpTools {
     return tools;
   }
 
-  call(name, args = {}) {
+  async call(name, args = {}) {
     if (activeOnlyTool(name) && this.mcpConfig().activeTesting !== true) {
       return permissionDenied(name);
     }
@@ -271,21 +272,21 @@ class McpTools {
       case 'list_credentials':
         return this.listSecrets();
       case 'list_proxy_history':
-        return this.listProxyHistory(args);
+        return await this.listProxyHistory(args);
       case 'get_proxy_item':
-        return this.getProxyItem(args);
+        return await this.getProxyItem(args);
       case 'search_proxy_history':
-        return this.searchProxyHistory(args);
+        return await this.searchProxyHistory(args);
       case 'find_login_requests':
-        return this.findLoginRequests(args);
+        return await this.findLoginRequests(args);
       case 'find_json_api_requests':
-        return this.findJsonApiRequests(args);
+        return await this.findJsonApiRequests(args);
       case 'list_endpoints':
-        return this.listEndpoints(args);
+        return await this.listEndpoints(args);
       case 'summarize_scope_surface':
-        return this.summarizeScopeSurface(args);
+        return await this.summarizeScopeSurface(args);
       case 'list_reported_findings':
-        return this.listReportedFindings(args);
+        return await this.listReportedFindings(args);
       case 'send_modified_proxy_item':
         return this.sendModifiedProxyItem(args);
       case 'get_sent_traffic_item':
@@ -370,17 +371,19 @@ class McpTools {
     });
   }
 
-  anonymizeHttp(args) {
+  async anonymizeHttp(args) {
     const message = requiredText(args, 'message');
     const direction = optionalText(args, 'direction', 'auto');
     const aggressivePathRedaction = optionalBoolean(args, 'aggressivePathRedaction', false);
-    const result = this.anonymizeMessage(message, direction, aggressivePathRedaction ? { aggressivePathRedaction } : {});
+    const result = await this.anonymizeMessageForMcpTool(message, direction, aggressivePathRedaction ? { aggressivePathRedaction } : {});
     return toolResult({
       message: result.text,
       replacements: result.replacements,
       decisions: result.decisions,
       evidence: result.evidence,
       aliasMappings: this.aliasVault.mappingCount(),
+      veilCoreUsed: result.veilCore?.used === true,
+      veilCoreFallback: result.veilCore?.fallback === true,
     });
   }
 
@@ -397,16 +400,16 @@ class McpTools {
     });
   }
 
-  listProxyHistory(args) {
+  async listProxyHistory(args) {
     const blocked = this.ensureScope();
     if (blocked) return blocked;
     const limit = clampInt(args.limit, 1, 100, 25);
     const inScopeOnly = optionalBoolean(args, 'inScopeOnly', true);
     const records = this.history(limit, inScopeOnly);
-    return recordListResult(records.map((flow) => this.recordSummary(flow)), 'items', this.aliasVault.mappingCount());
+    return recordListResult(await this.recordSummaries(records), 'items', this.aliasVault.mappingCount());
   }
 
-  getProxyItem(args) {
+  async getProxyItem(args) {
     const blocked = this.ensureScope();
     if (blocked) return blocked;
     const id = requiredText(args, 'id');
@@ -418,10 +421,10 @@ class McpTools {
     if (!this.scopeAllows(flow)) {
       return toolError(`Scope guard blocked request ${id}`);
     }
-    return this.proxyItemResult(flow, includeResponse);
+    return await this.proxyItemResultAsync(flow, includeResponse);
   }
 
-  searchProxyHistory(args) {
+  async searchProxyHistory(args) {
     const blocked = this.ensureScope();
     if (blocked) return blocked;
     const limit = clampInt(args.limit, 1, 250, 100);
@@ -434,19 +437,19 @@ class McpTools {
       .filter((flow) => !method || flow.request.method.toUpperCase() === method)
       .filter((flow) => statusCode < 0 || Number(flow.response?.statusCode || 0) === statusCode)
       .filter((flow) => !filterHasResponse || Boolean(flow.response) === args.hasResponse);
-    return recordListResult(records.map((flow) => this.recordSummary(flow)), 'items', this.aliasVault.mappingCount());
+    return recordListResult(await this.recordSummaries(records), 'items', this.aliasVault.mappingCount());
   }
 
-  findLoginRequests(args) {
+  async findLoginRequests(args) {
     const blocked = this.ensureScope();
     if (blocked) return blocked;
     const records = this.history(clampInt(args.limit, 1, 250, 100), true).filter((flow) =>
       /login|signin|sign-in|authenticate|password|username|session|token/i.test(searchHaystack(flow)),
     );
-    return recordListResult(records.map((flow) => this.recordSummary(flow)), 'items', this.aliasVault.mappingCount());
+    return recordListResult(await this.recordSummaries(records), 'items', this.aliasVault.mappingCount());
   }
 
-  findJsonApiRequests(args) {
+  async findJsonApiRequests(args) {
     const blocked = this.ensureScope();
     if (blocked) return blocked;
     const records = this.history(clampInt(args.limit, 1, 250, 100), true).filter((flow) => {
@@ -455,10 +458,10 @@ class McpTools {
       const responseContentType = headerValue(flow.response?.headers, 'content-type');
       return /application\/json/i.test(`${requestContentType} ${requestAccept} ${responseContentType}`) || /\/api\/|\/rest\//i.test(flow.request.url);
     });
-    return recordListResult(records.map((flow) => this.recordSummary(flow)), 'items', this.aliasVault.mappingCount());
+    return recordListResult(await this.recordSummaries(records), 'items', this.aliasVault.mappingCount());
   }
 
-  listEndpoints(args) {
+  async listEndpoints(args) {
     const blocked = this.ensureScope();
     if (blocked) return blocked;
     const limit = clampInt(args.limit, 1, 500, 250);
@@ -470,7 +473,7 @@ class McpTools {
         endpoints.set(key, {
           method: flow.request.method,
           path,
-          sampleUrl: this.anonymizeText(flow.request.url),
+          sampleUrl: await this.anonymizeTextForReadTool(flow.request.url),
           count: 0,
           statusCodes: {},
         });
@@ -489,7 +492,7 @@ class McpTools {
     });
   }
 
-  summarizeScopeSurface(args) {
+  async summarizeScopeSurface(args) {
     const blocked = this.ensureScope();
     if (blocked) return blocked;
     const records = this.history(clampInt(args.limit, 1, 500, 250), true);
@@ -501,10 +504,10 @@ class McpTools {
       if (flow.response?.statusCode) {
         statusCodes[flow.response.statusCode] = (statusCodes[flow.response.statusCode] || 0) + 1;
       }
-      const host = this.anonymizeText(safeUrl(flow.request.url)?.host || '');
+      const host = await this.anonymizeTextForReadTool(safeUrl(flow.request.url)?.host || '');
       hosts[host] = (hosts[host] || 0) + 1;
     }
-    const endpoints = this.listEndpoints(args).structuredContent.items;
+    const endpoints = (await this.listEndpoints(args)).structuredContent.items;
     return toolResult({
       inspected: records.length,
       withResponse: records.filter((flow) => Boolean(flow.response)).length,
@@ -1159,15 +1162,15 @@ class McpTools {
     });
   }
 
-  listReportedFindings(args) {
+  async listReportedFindings(args) {
     const limit = clampInt(args.limit, 1, 500, 100);
     const reporter = optionalText(args, 'reporter', '').toLowerCase();
     const category = optionalText(args, 'category', '').toLowerCase();
-    const items = (this.proxy.getReportedFindings ? this.proxy.getReportedFindings() : [])
+    const filtered = (this.proxy.getReportedFindings ? this.proxy.getReportedFindings() : [])
       .filter((finding) => !reporter || String(finding.reporter || '').toLowerCase() === reporter)
       .filter((finding) => !category || String(finding.category || '').toLowerCase() === category)
-      .slice(0, limit)
-      .map((finding) => this.reportedFindingSummary(finding));
+      .slice(0, limit);
+    const items = await Promise.all(filtered.map((finding) => this.reportedFindingSummaryAsync(finding)));
     return toolResult({
       items,
       count: items.length,
@@ -1198,6 +1201,30 @@ class McpTools {
       statusCode: finding.statusCode || null,
       detail: this.anonymizeText(finding.description || ''),
       remediation: this.anonymizeText(finding.remediation || ''),
+      rawRequestReturned: false,
+      rawResponseReturned: false,
+      hasRequestEvidence: true,
+      hasResponseEvidence: finding.statusCode != null,
+    };
+  }
+
+  async reportedFindingSummaryAsync(finding) {
+    return {
+      id: String(finding.id || ''),
+      time: finding.mcpReportedAt || '',
+      sourceId: String((finding.flowIds || [])[0] || ''),
+      sentTrafficId: finding.sentTrafficId || '',
+      evidenceSource: finding.evidenceSource || '',
+      reporter: finding.reporter || '',
+      category: finding.category || '',
+      name: await this.anonymizeTextForReadTool(finding.title || ''),
+      severity: finding.severity || '',
+      confidence: finding.confidence || '',
+      method: finding.method || '',
+      url: await this.anonymizeTextForReadTool(finding.url || ''),
+      statusCode: finding.statusCode || null,
+      detail: await this.anonymizeTextForReadTool(finding.description || ''),
+      remediation: await this.anonymizeTextForReadTool(finding.remediation || ''),
       rawRequestReturned: false,
       rawResponseReturned: false,
       hasRequestEvidence: true,
@@ -1261,6 +1288,26 @@ class McpTools {
     };
   }
 
+  async recordSummaries(records) {
+    return await Promise.all(records.map((flow) => this.recordSummaryAsync(flow)));
+  }
+
+  async recordSummaryAsync(flow) {
+    const response = flow.response || {};
+    const url = await this.anonymizeTextForReadTool(flow.request.url);
+    return {
+      id: String(flow.id),
+      method: flow.request.method,
+      url,
+      path: endpointPath(url),
+      statusCode: response.statusCode || null,
+      hasResponse: Boolean(flow.response),
+      time: flow.startedAt,
+      inScope: this.proxy.isFlowInScope(flow),
+      error: flow.error || null,
+    };
+  }
+
   attackSummary(record, payload, resolvedPayload, index, baseline) {
     const responseText = record.response?.bodyText || '';
     const responseBytes = record.response ? Buffer.byteLength(record.response.bodyBase64 || '', 'base64') : 0;
@@ -1313,11 +1360,86 @@ class McpTools {
     return toolResult(structured);
   }
 
+  async proxyItemResultAsync(flow, includeResponse) {
+    const request = await this.anonymizeMessageForReadTool(rawRequest(flow), 'request');
+    const structured = {
+      id: String(flow.id),
+      method: flow.request.method,
+      url: await this.anonymizeTextForReadTool(flow.request.url),
+      statusCode: flow.response?.statusCode || null,
+      hasResponse: Boolean(flow.response),
+      request: request.text,
+      requestReplacements: request.replacements,
+      requestDecisions: request.decisions,
+      requestEvidence: request.evidence,
+      rawRequestReturned: false,
+      rawResponseReturned: false,
+      aliasMappings: this.aliasVault.mappingCount(),
+      veilCoreUsed: request.veilCore?.used === true,
+      veilCoreFallback: request.veilCore?.fallback === true,
+    };
+    if (includeResponse && flow.response) {
+      const response = await this.anonymizeMessageForReadTool(rawResponse(flow), 'response');
+      structured.response = response.text;
+      structured.responseReplacements = response.replacements;
+      structured.responseDecisions = response.decisions;
+      structured.responseEvidence = response.evidence;
+      structured.veilCoreUsed = structured.veilCoreUsed || response.veilCore?.used === true;
+      structured.veilCoreFallback = structured.veilCoreFallback || response.veilCore?.fallback === true;
+    }
+    return toolResult(structured);
+  }
+
   anonymizeMessage(message, direction, options = {}) {
     return this.anonymizer.anonymizeHttpMessage(this.secretVault.redactSecrets(message), direction, {
       ...this.anonymizationOptions(),
       ...options,
     });
+  }
+
+  async anonymizeMessageForMcpTool(message, direction, options = {}) {
+    return await this.anonymizeMessageViaVeilCore(message, direction, options, 'mcp_response');
+  }
+
+  async anonymizeMessageForReadTool(message, direction, options = {}) {
+    return await this.anonymizeMessageViaVeilCore(message, direction, options, 'mcp_history');
+  }
+
+  async anonymizeTextForReadTool(text) {
+    const cfg = this.mcpConfig().veilCore || {};
+    if (cfg.enabled === true && this.veilCore && typeof this.veilCore.sanitizeText === 'function') {
+      try {
+        const result = await this.veilCore.sanitizeText(this.secretVault.redactSecrets(text), 'mcp_history');
+        return result.text;
+      } catch (error) {
+        if (cfg.fallbackOnError === false) {
+          throw error;
+        }
+        return this.anonymizeText(text);
+      }
+    }
+    return this.anonymizeText(text);
+  }
+
+  async anonymizeMessageViaVeilCore(message, direction, options = {}, purpose = 'mcp_response') {
+    const cfg = this.mcpConfig().veilCore || {};
+    if (cfg.enabled === true && this.veilCore && typeof this.veilCore.sanitizeHttpMessage === 'function') {
+      try {
+        return await this.veilCore.sanitizeHttpMessage(
+          this.secretVault.redactSecrets(message),
+          direction,
+          purpose,
+        );
+      } catch (error) {
+        if (cfg.fallbackOnError === false) {
+          throw error;
+        }
+        const fallback = this.anonymizeMessage(message, direction, options);
+        fallback.veilCore = { used: false, fallback: true, error: error.message };
+        return fallback;
+      }
+    }
+    return this.anonymizeMessage(message, direction, options);
   }
 
   anonymizeText(text) {

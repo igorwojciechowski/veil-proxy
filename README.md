@@ -54,6 +54,27 @@ Enable MCP in `Settings -> MCP`, or start web mode with:
 VEIL_MCP_ENABLED=1 VEIL_MCP_PORT=8765 VEIL_MCP_TOKEN=change-me npm run server
 ```
 
+To back MCP anonymization with `veil-core` instead of the local in-memory alias
+vault, start `veil-core` first and enable MCP Veil Mode:
+
+```sh
+VEIL_CORE_ENABLED=1 \
+VEIL_CORE_SOCKET=/tmp/veil.sock \
+VEIL_CORE_SCOPE_ID=scope-123 \
+VEIL_MCP_ENABLED=1 \
+VEIL_MCP_TOKEN=change-me \
+npm run server
+```
+
+Local operator views stay raw: Traffic, Site map, Relay, and exports show the
+real captured HTTP/HTTPS data. Veil Mode applies only at the MCP boundary, so
+LLM-facing tools such as `anonymize_http`, `list_proxy_history`,
+`get_proxy_item`, `search_proxy_history`, `list_endpoints`,
+`summarize_scope_surface`, and `list_reported_findings` receive sanitized
+output. If `veil-core` is unavailable, MCP falls back to the local anonymizer by
+default. Set `mcp.veilCore.fallbackOnError=false` in config when fail-closed
+MCP behavior is required.
+
 The MCP endpoint is `http://127.0.0.1:<port>/mcp` and requires:
 
 ```text

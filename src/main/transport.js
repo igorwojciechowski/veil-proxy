@@ -229,6 +229,7 @@ function connectDirect(host, port, secure, options = {}) {
       tlsSocket.once('error', reject);
       tlsSocket.once('secureConnect', () => {
         tlsSocket.off('error', reject);
+        attachSocketErrorSink(tlsSocket);
         resolve(tlsSocket);
       });
     });
@@ -282,6 +283,7 @@ function connectHttpProxyTunnel(host, port, upstream, secureAfterConnect = false
         tlsSocket.once('error', reject);
         tlsSocket.once('secureConnect', () => {
           tlsSocket.off('error', reject);
+          attachSocketErrorSink(tlsSocket);
           resolve(tlsSocket);
         });
       })
@@ -354,6 +356,7 @@ function connectViaSocks5(host, port, secure, upstream, options = {}) {
         tlsSocket.once('error', reject);
         tlsSocket.once('secureConnect', () => {
           tlsSocket.off('error', reject);
+          attachSocketErrorSink(tlsSocket);
           resolve(tlsSocket);
         });
       })
@@ -393,6 +396,20 @@ function tlsConnectionOptions(socket, servername, options = {}) {
     tlsOptions.servername = servername;
   }
   return tlsOptions;
+}
+
+function attachSocketErrorSink(socket) {
+  socket.on('error', (error) => {
+    if (isBenignTlsCloseNotify(error)) {
+      return;
+    }
+    socket.destroy(error);
+  });
+}
+
+function isBenignTlsCloseNotify(error) {
+  const text = `${error && error.code ? error.code : ''} ${error && error.message ? error.message : ''}`;
+  return /SSLV3_ALERT_CLOSE_NOTIFY|alert close notify|ssl alert number 0/i.test(text);
 }
 
 function encodeIpv4(host) {

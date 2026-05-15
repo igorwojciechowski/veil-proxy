@@ -11,10 +11,11 @@
       <aside class="sidebar">
         <div class="brand">
           <div class="brand-mark">V</div>
-          <div>
+          <div class="brand-text">
             <div class="brand-name">Veil Proxy</div>
             <div class="brand-subtitle">Intercepting proxy</div>
           </div>
+          <button id="sidebarToggleBtn" class="icon-button sidebar-toggle" type="button" title="Collapse sidebar" aria-label="Collapse sidebar" aria-pressed="false">☰</button>
         </div>
 
         <nav class="nav" aria-label="Primary">
@@ -59,6 +60,10 @@
             <button class="nav-item" type="button" data-view="attacks" title="Fuzzer">
               <span class="nav-icon">⌁</span>
               <span>Fuzzer</span>
+            </button>
+            <button class="nav-item" type="button" data-view="activeScans" title="Active Scans">
+              <span class="nav-icon">◉</span>
+              <span>Scanner</span>
             </button>
             <button class="nav-item" type="button" data-view="mcp" title="MCP">
               <span class="nav-icon">◇</span>
@@ -116,17 +121,11 @@
           <div class="traffic-view-stack">
           <div class="layout-toolbar">
             <div class="segmented compact-segmented">
-              <button id="trafficHorizontalLayoutBtn" class="segment active" type="button">Horizontal</button>
-              <button id="trafficVerticalLayoutBtn" class="segment" type="button">Vertical</button>
+              <button id="trafficHorizontalLayoutBtn" class="segment icon-segment active" type="button" title="Horizontal layout" aria-label="Horizontal layout">↔</button>
+              <button id="trafficVerticalLayoutBtn" class="segment icon-segment" type="button" title="Vertical layout" aria-label="Vertical layout">↕</button>
             </div>
-            <label class="inline-check">
-              <input id="showTrafficListToggle" type="checkbox" checked />
-              <span>List</span>
-            </label>
-            <label class="inline-check">
-              <input id="showTrafficDetailToggle" type="checkbox" checked />
-              <span>Detail</span>
-            </label>
+            <button id="showTrafficListToggle" class="icon-button layout-icon-button active" type="button" title="Toggle request list" aria-label="Toggle request list" aria-pressed="true">☷</button>
+            <button id="showTrafficDetailToggle" class="icon-button layout-icon-button active" type="button" title="Toggle detail panel" aria-label="Toggle detail panel" aria-pressed="true">◫</button>
           </div>
           <div class="split-grid traffic-split" id="trafficSplit">
             <section class="panel traffic-panel">
@@ -335,6 +334,38 @@
 
         <section id="mcpView" class="view">
           <div class="mcp-workspace">
+            <div class="mcp-server-strip" aria-label="MCP server controls">
+              <label class="switch-control mcp-strip-toggle" title="Start or stop the local MCP server">
+                <input id="mcpEnabledToggle" type="checkbox" />
+                <span class="switch"></span>
+                <span>MCP</span>
+              </label>
+              <label class="switch-control mcp-strip-toggle" title="Anonymize MCP responses through veil-core">
+                <input id="mcpVeilModeToggle" type="checkbox" />
+                <span class="switch"></span>
+                <span>Veil Mode</span>
+              </label>
+              <label class="mcp-strip-field mcp-host-field">
+                Host
+                <input id="mcpHost" type="text" autocomplete="off" spellcheck="false" />
+              </label>
+              <label class="mcp-strip-field mcp-port-field">
+                Port
+                <input id="mcpPort" type="number" min="0" max="65535" autocomplete="off" />
+              </label>
+              <div class="mcp-strip-field mcp-token-strip-field">
+                <span>Token</span>
+                <div class="mcp-token-control">
+                  <input id="mcpToken" type="text" autocomplete="off" spellcheck="false" />
+                  <button class="icon-button copy-icon-button" type="button" data-copy-target="mcpToken" title="Copy MCP token" aria-label="Copy MCP token">⧉</button>
+                </div>
+              </div>
+              <button id="saveMcpBtn" class="button primary compact-button" type="button">Apply</button>
+              <div class="mcp-strip-status hidden">
+                <div id="mcpEndpoint" class="mcp-endpoint">MCP disabled</div>
+                <div id="mcpStatus" class="hint-line">Local operator views stay raw. Veil Mode anonymizes MCP responses through veil-core.</div>
+              </div>
+            </div>
             <div class="mcp-tabbar" role="tablist" aria-label="MCP workspace">
               <button class="mcp-tab active" type="button" data-mcp-tab="sentTraffic" role="tab">Issued</button>
               <button class="mcp-tab" type="button" data-mcp-tab="mcpLog" role="tab">Audit</button>
@@ -817,24 +848,11 @@
             <section class="panel mcp-panel">
               <div class="panel-title-row">
                 <div>
-                  <h2>MCP server</h2>
-                  <div class="panel-subtitle">Anonymized LLM access to captured traffic and secret aliases</div>
+                  <h2>MCP policy</h2>
+                  <div class="panel-subtitle">Runtime permissions for LLM access to captured traffic and secret aliases</div>
                 </div>
-                <button id="saveMcpBtn" class="button primary compact-button" type="button">Apply MCP</button>
               </div>
               <div class="field-grid mcp-field-grid">
-                <label class="inline-check settings-inline-check">
-                  <span>Enabled</span>
-                  <input id="mcpEnabledToggle" type="checkbox" />
-                </label>
-                <label>
-                  Port
-                  <input id="mcpPort" type="number" min="0" max="65535" autocomplete="off" />
-                </label>
-                <label class="mcp-token-field">
-                  Token
-                  <input id="mcpToken" type="text" autocomplete="off" spellcheck="false" />
-                </label>
                 <label class="inline-check settings-inline-check">
                   <span>Require scope</span>
                   <input id="mcpRequireScopeToggle" type="checkbox" />
@@ -844,8 +862,7 @@
                   <input id="mcpActiveTestingToggle" type="checkbox" />
                 </label>
               </div>
-              <div id="mcpEndpoint" class="mcp-endpoint">MCP disabled</div>
-              <div id="mcpStatus" class="hint-line">MCP returns anonymized data only. Real secret values are never returned.</div>
+              <div class="hint-line">Server address, port, token, and Veil Mode live in the MCP header. Use Apply there after changing policy.</div>
             </section>
 
             <section class="panel anonymization-panel">
@@ -927,8 +944,75 @@
                     <option value="low">Low</option>
                   </select>
                 </label>
+                <label>
+                  Source
+                  <select id="findingsSourceFilter">
+                    <option value="">All</option>
+                    <option value="passive">Passive scan</option>
+                    <option value="active">Active</option>
+                    <option value="mcp">MCP</option>
+                  </select>
+                </label>
               </div>
               <div id="findingsList" class="findings-list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="activeScansView" class="view">
+          <div class="active-scans-layout">
+            <section class="panel active-scans-panel">
+              <div class="panel-title-row">
+                <div>
+                  <h2>Active Scans</h2>
+                  <div id="activeScansSubtitle" class="panel-subtitle">0 runs</div>
+                </div>
+                <button id="refreshActiveScansBtn" class="button ghost compact-button" type="button">Refresh</button>
+              </div>
+              <div class="table-wrap active-scans-table-wrap">
+                <table class="traffic-table">
+                  <thead>
+                    <tr>
+                      <th>ID</th>
+                      <th>Status</th>
+                      <th>Request</th>
+                      <th>Progress</th>
+                      <th>Findings</th>
+                      <th>Time</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody id="activeScanRows"></tbody>
+                </table>
+              </div>
+            </section>
+            <section class="panel active-scan-detail-panel">
+              <div id="emptyActiveScanDetail" class="empty-state">Select active scan</div>
+              <div id="activeScanDetail" class="detail-content hidden">
+                <div class="detail-header">
+                  <div>
+                    <div id="activeScanStatus" class="status-pill">-</div>
+                    <h2 id="activeScanTitle"></h2>
+                  </div>
+                  <button id="activeScanSourceBtn" class="button ghost compact-button" type="button">Open request</button>
+                </div>
+                <pre id="activeScanMeta" class="code-block"></pre>
+                <div class="table-wrap">
+                  <table class="traffic-table">
+                    <thead>
+                      <tr>
+                        <th>#</th>
+                        <th>Template</th>
+                        <th>Insertion</th>
+                        <th>Status</th>
+                        <th>Finding</th>
+                        <th>Time</th>
+                      </tr>
+                    </thead>
+                    <tbody id="activeScanResultRows"></tbody>
+                  </table>
+                </div>
+              </div>
             </section>
           </div>
         </section>

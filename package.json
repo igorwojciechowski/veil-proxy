@@ -5,8 +5,8 @@
   "main": "src/electron/main.js",
   "type": "commonjs",
   "scripts": {
-    "start": "electron .",
-    "desktop": "electron .",
+    "start": "node ./node_modules/electron/cli.js .",
+    "desktop": "node ./node_modules/electron/cli.js .",
     "server": "node src/main/server.js",
     "test": "node --test test/*.test.js",
     "package:mac": "CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac dir",
